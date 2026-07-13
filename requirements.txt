@@ -1,0 +1,7 @@
+google-genai
+numpy
+openai
+pillow
+python-dotenv
+python-telegram-bot
+requests
