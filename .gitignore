@@ -11,3 +11,5 @@ assets/*.png
 .DS_Store
 logs/*
 !logs/.gitkeep
+test_output/*
+!test_output/.gitkeep

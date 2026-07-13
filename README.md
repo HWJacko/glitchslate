@@ -147,6 +147,37 @@ Replay Telegram from a known update id:
 python3 main.py --telegram-replay-from 123456789
 ```
 
+
+## Local Mock Dataset Output
+
+Build a deterministic local-only mock dataset and wallpaper without reading `.env`, calling external APIs, or applying the wallpaper:
+
+```bash
+python3 scripts/build_mock_output.py --width 1920 --height 1080
+```
+
+By default this writes to:
+
+```text
+test_output/mock_dataset/
+```
+
+The output root contains:
+
+```text
+mock_glitchslate.db      SQLite database with Telegram-like and Strava-like mock activities
+assets/                  Rendered mock wallpapers
+summary.json             Score, source totals, rolling points, diagnostics, and rendered paths
+```
+
+The mock output is ignored by Git. It is intended for screenshots, renderer checks, documentation, and testing the full visual pipeline with realistic data while keeping real personal activity data local and private.
+
+Use a different root or date if needed:
+
+```bash
+python3 scripts/build_mock_output.py --output-root /tmp/glitchslate-demo --date 2026-07-13
+```
+
 ## Telegram Setup
 
 1. Create a bot with BotFather.
@@ -253,10 +284,11 @@ os_sync.py           macOS wallpaper application
 schema.sql           SQLite schema
 config.py            Config loading and validation
 config.yaml          Non-secret defaults
-scripts/             launchd install/uninstall helpers
+scripts/             launchd helpers and local mock output generator
 launchd/             launchd documentation
 assets/              Generated wallpapers, ignored except .gitkeep
 logs/                launchd logs, ignored except .gitkeep
+test_output/         local mock/demo output, ignored except .gitkeep
 tests/               Unit tests
 ```
 
@@ -268,6 +300,7 @@ The repository is intended to be safe to publish with the included ignore rules:
 - SQLite databases are ignored.
 - Generated wallpaper PNGs are ignored.
 - LaunchAgent logs are ignored.
+- Local mock output is ignored.
 - Python cache files are ignored.
 
 Before publishing, run:
@@ -276,6 +309,7 @@ Before publishing, run:
 git status --short
 rg -n "(api[_-]?key|token|secret|password|bearer|sk-[A-Za-z0-9])" -g '!*env*' -g '!assets/*.png' -g '!*.db' -g '!*.sqlite' -g '!*.sqlite3'
 python3 -m unittest
+python3 scripts/build_mock_output.py --width 640 --height 360
 ```
 
 The search will still show expected environment variable names and test placeholders; investigate anything that looks like a real credential.
