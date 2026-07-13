@@ -9,3 +9,5 @@ __pycache__/
 assets/*.png
 !assets/.gitkeep
 .DS_Store
+logs/*
+!logs/.gitkeep

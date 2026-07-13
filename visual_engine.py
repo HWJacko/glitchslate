@@ -23,6 +23,10 @@ class RenderDiagnostics:
     max_5_day_minutes: int
     bar_scale_minutes: float
     status: str
+    today_minutes: int
+    gap_days: int
+    vignette_mode: str
+    sentient_log_present: bool
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,34 @@ def system_status(score: int) -> str:
     if score >= 20:
         return "AT RISK"
     return "CRITICAL"
+
+
+def vignette_mode(score: int) -> str:
+    if score > 80:
+        return "cyan"
+    if score < 50:
+        return "warning"
+    return "neutral"
+
+
+def systemd_status_lines(today_minutes: int, gap_days: int, *, alert_gap_days: int = 3) -> list[str]:
+    if today_minutes > 0:
+        return [
+            "● kinetic_drive.service - Active (Running) since 4h ago",
+            "● cardio_subsystem.status - NOMINAL (98% efficiency)",
+            "● motivation_daemon.bin - Active (Running)",
+        ]
+    if gap_days >= alert_gap_days:
+        return [
+            "● kinetic_drive.service - Inactive (Dead)",
+            "● cardio_subsystem.status - DEGRADED (Low physical input)",
+            "⚠ [ERR] motivation_daemon.bin dumped core (Exit code: 127)",
+        ]
+    return [
+        "● kinetic_drive.service - Idle (Monitoring)",
+        "● cardio_subsystem.status - WARNING (Awaiting physical input)",
+        "● motivation_daemon.bin - Active (Backoff timer)",
+    ]
 
 
 def _hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -129,6 +161,41 @@ def _draw_vertical_gradient(draw, xy, radius: int, start_color, end_color) -> No
     _rounded_rectangle(draw, xy, radius=radius, fill=None, outline=start_color, width=max(1, int((x1 - x0) * 0.05)))
 
 
+def _draw_centered_text(draw, y: int, text: str, *, width: int, fill, font) -> None:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    draw.text((int((width - (bbox[2] - bbox[0])) / 2), y), text, fill=fill, font=font)
+
+
+def _draw_vignette(image, score: int) -> None:
+    from PIL import Image, ImageDraw
+
+    mode = vignette_mode(score)
+    if mode == "neutral":
+        color = (0, 0, 0)
+        max_alpha = 40
+    elif mode == "cyan":
+        color = (6, 182, 212)
+        max_alpha = 34
+    else:
+        color = (239, 68, 68) if score < 25 else (245, 158, 11)
+        max_alpha = 112 if score < 25 else 84
+
+    width, height = image.size
+    steps = max(12, int(min(width, height) * 0.075))
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for step in range(steps):
+        alpha = int(max_alpha * (1 - step / steps) ** 1.8)
+        if alpha <= 0:
+            continue
+        draw.rectangle(
+            (step, step, width - step - 1, height - step - 1),
+            outline=(*color, alpha),
+            width=1,
+        )
+    image.alpha_composite(overlay)
+
+
 def _label_indices(values: list[int]) -> set[int]:
     indices = {len(values) - 1}
     indices.update(range(4, len(values), 5))
@@ -151,6 +218,12 @@ def render_wallpaper(
     rolling_points: list[tuple[str, int]] | None = None,
     streak_days: int = 0,
     expected_recent_minutes: float = 60.0,
+    today_minutes: int = 0,
+    gap_days: int = 0,
+    sentient_log: str | None = None,
+    show_systemd_box: bool = True,
+    show_vignette: bool = True,
+    systemd_alert_gap_days: int = 3,
 ) -> RenderResult:
     config = visual_config or VisualConfig(target_resolution=f"{width}x{height}")
     output_path = Path(output_dir)
@@ -165,6 +238,7 @@ def render_wallpaper(
     max_minutes = max(values) if values else 0
     bar_scale = max(float(expected_recent_minutes), float(max_minutes), 1.0)
     status = system_status(score)
+    vignette = vignette_mode(score) if show_vignette else "off"
 
     try:
         from PIL import Image, ImageDraw
@@ -181,17 +255,18 @@ def render_wallpaper(
         gradient_start = _hex_to_rgb(config.active_gradient[0])
         gradient_end = _hex_to_rgb(config.active_gradient[1])
 
-        image = Image.new("RGB", (width, height), bg)
+        image = Image.new("RGBA", (width, height), (*bg, 255))
         draw = ImageDraw.Draw(image)
         title_font = _font(max(18, int(height * 0.026)))
         meta_font = _font(max(14, int(height * 0.021)))
         label_font = _font(max(10, int(height * 0.015)))
         small_font = _font(max(9, int(height * 0.012)))
+        log_font = _font(max(10, int(height * 0.014)))
 
         chart_left = int(width * 0.09)
         chart_right = int(width * 0.91)
         chart_top = int(height * 0.38)
-        chart_bottom = int(height * 0.80)
+        chart_bottom = int(height * 0.74)
         chart_width = chart_right - chart_left
         chart_height = chart_bottom - chart_top
 
@@ -244,8 +319,31 @@ def render_wallpaper(
             draw.text((header_x, header_y + offset * int(height * 0.04)), line, fill=fill, font=title_font if offset == 0 else meta_font)
 
         footer = f"ROLLING 5-DAY TOTALS // TARGET {int(round(expected_recent_minutes))}m // WINDOW END {day}"
-        draw.text((chart_left, int(height * 0.88)), footer, fill=muted, font=small_font)
-        image.save(timestamped)
+        draw.text((chart_left, int(height * 0.80)), footer, fill=muted, font=small_font)
+
+        if show_systemd_box:
+            systemd_lines = systemd_status_lines(today_minutes, gap_days, alert_gap_days=systemd_alert_gap_days)
+            log_x = chart_left
+            log_y = int(height * 0.845)
+            line_step = max(11, int(height * 0.017))
+            for offset, line in enumerate(systemd_lines):
+                fill = alert if "ERR" in line or "DEGRADED" in line else muted
+                draw.text((log_x, log_y + offset * line_step), line, fill=fill, font=small_font)
+
+        if sentient_log:
+            _draw_centered_text(
+                draw,
+                int(height * 0.94),
+                sentient_log,
+                width=width,
+                fill=text,
+                font=log_font,
+            )
+
+        if show_vignette:
+            _draw_vignette(image, score)
+
+        image.convert("RGB").save(timestamped)
         backend = "pillow"
 
     shutil.copyfile(timestamped, current)
@@ -261,6 +359,10 @@ def render_wallpaper(
             max_5_day_minutes=max_minutes,
             bar_scale_minutes=bar_scale,
             status=status,
+            today_minutes=today_minutes,
+            gap_days=gap_days,
+            vignette_mode=vignette,
+            sentient_log_present=bool(sentient_log),
         ),
     )
 
@@ -288,7 +390,8 @@ def main() -> int:
         f"latest_5_day_minutes={result.diagnostics.latest_5_day_minutes} "
         f"max_5_day_minutes={result.diagnostics.max_5_day_minutes} "
         f"bar_scale_minutes={result.diagnostics.bar_scale_minutes:.2f} "
-        f"status={result.diagnostics.status}"
+        f"status={result.diagnostics.status} "
+        f"vignette={result.diagnostics.vignette_mode}"
     )
     return 0
 

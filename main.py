@@ -7,8 +7,19 @@ from datetime import datetime
 from pathlib import Path
 
 from config import get_timezone, load_config, load_dotenv, parse_resolution
-from db import calculate_daily_score, connect, init_db, rolling_window_minutes, set_sync_state
+from db import (
+    calculate_daily_score,
+    connect,
+    current_gap_days,
+    get_cached_sentient_log,
+    init_db,
+    minutes_for_day,
+    rolling_window_minutes,
+    set_cached_sentient_log,
+    set_sync_state,
+)
 from os_sync import cleanup_old_wallpapers, set_wallpaper
+from sentient_log import fallback_sentient_log, generate_sentient_log
 from strava_sync import sync_strava
 from telegram_sync import sync_telegram
 from visual_engine import render_wallpaper
@@ -93,6 +104,42 @@ def run_pipeline(
         point_count=app_config.scoring.baseline_window_days,
         window_days=app_config.scoring.recent_window_days,
     )
+    today_minutes = minutes_for_day(conn, today)
+    gap_days = current_gap_days(conn, end_day=today)
+    sentient_log = None
+    if app_config.sentient_log.enabled and not dry_run:
+        sentient_log = get_cached_sentient_log(
+            conn,
+            day=today_key,
+            score=score.score,
+            streak_days=score.streak_days,
+            today_minutes=today_minutes,
+        )
+        if sentient_log is None:
+            try:
+                sentient_log = generate_sentient_log(
+                    score=score.score,
+                    streak_days=score.streak_days,
+                    today_minutes=today_minutes,
+                    model=app_config.sentient_log.model,
+                    max_chars=app_config.sentient_log.max_chars,
+                )
+                set_cached_sentient_log(
+                    conn,
+                    day=today_key,
+                    score=score.score,
+                    streak_days=score.streak_days,
+                    today_minutes=today_minutes,
+                    text=sentient_log,
+                )
+            except Exception as exc:
+                _warn(f"OpenAI sentient log warning: {exc}")
+                sentient_log = fallback_sentient_log(
+                    score=score.score,
+                    streak_days=score.streak_days,
+                    today_minutes=today_minutes,
+                    max_chars=app_config.sentient_log.max_chars,
+                )
     result = render_wallpaper(
         score=score.score,
         day=today_key,
@@ -103,6 +150,12 @@ def run_pipeline(
         rolling_points=chart_points,
         streak_days=score.streak_days,
         expected_recent_minutes=score.expected_recent_minutes,
+        today_minutes=today_minutes,
+        gap_days=gap_days,
+        sentient_log=sentient_log,
+        show_systemd_box=app_config.telemetry.show_systemd_box,
+        show_vignette=app_config.telemetry.show_vignette,
+        systemd_alert_gap_days=app_config.telemetry.gap_alert_days,
     )
     if not app_config.visual.keep_archive_images:
         cleanup_old_wallpapers(assets_dir, older_than_hours=app_config.visual.archive_retention_hours)
@@ -118,6 +171,7 @@ def run_pipeline(
         f"recent_minutes={score.recent_minutes} "
         f"baseline_daily_minutes={score.baseline_daily_minutes:.2f} "
         f"expected_recent_minutes={score.expected_recent_minutes:.2f} "
+        f"today_minutes={today_minutes} gap_days={gap_days} "
         f"glitch_factor={result.glitch_factor:.2f} wallpaper={result.timestamped_path}"
     )
     print(
@@ -127,7 +181,9 @@ def run_pipeline(
         f"latest_5_day_minutes={result.diagnostics.latest_5_day_minutes} "
         f"max_5_day_minutes={result.diagnostics.max_5_day_minutes} "
         f"bar_scale_minutes={result.diagnostics.bar_scale_minutes:.2f} "
-        f"status={result.diagnostics.status}"
+        f"status={result.diagnostics.status} "
+        f"vignette={result.diagnostics.vignette_mode} "
+        f"sentient_log={result.diagnostics.sentient_log_present}"
     )
     if dry_run and command:
         print("dry-run wallpaper command:", " ".join(command))

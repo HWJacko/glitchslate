@@ -173,6 +173,49 @@ def daily_minutes_map(
     return {str(row["local_date"]): int(row["total_minutes"]) for row in rows}
 
 
+def minutes_for_day(conn: sqlite3.Connection, day: date) -> int:
+    return _sum_minutes_between(conn, day, day)
+
+
+def current_gap_days(conn: sqlite3.Connection, *, end_day: date) -> int:
+    gap = 0
+    current = end_day
+    while True:
+        if minutes_for_day(conn, current) > 0:
+            return gap
+        gap += 1
+        current = current - timedelta(days=1)
+        if gap > 365:
+            return gap
+
+
+def sentient_log_cache_key(day: str, score: int, streak_days: int, today_minutes: int) -> str:
+    return f"sentient_log:{day}:{score}:{streak_days}:{today_minutes}"
+
+
+def get_cached_sentient_log(
+    conn: sqlite3.Connection,
+    *,
+    day: str,
+    score: int,
+    streak_days: int,
+    today_minutes: int,
+) -> str | None:
+    return get_sync_state(conn, sentient_log_cache_key(day, score, streak_days, today_minutes))
+
+
+def set_cached_sentient_log(
+    conn: sqlite3.Connection,
+    *,
+    day: str,
+    score: int,
+    streak_days: int,
+    today_minutes: int,
+    text: str,
+) -> None:
+    set_sync_state(conn, sentient_log_cache_key(day, score, streak_days, today_minutes), text)
+
+
 def rolling_window_minutes(
     conn: sqlite3.Connection,
     *,

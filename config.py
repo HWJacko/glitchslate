@@ -42,9 +42,25 @@ class ScoringConfig:
 
 
 @dataclass(frozen=True)
+class SentientLogConfig:
+    enabled: bool = True
+    model: str = "gpt-4o-mini"
+    max_chars: int = 90
+
+
+@dataclass(frozen=True)
+class TelemetryConfig:
+    show_systemd_box: bool = True
+    gap_alert_days: int = 3
+    show_vignette: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     visual: VisualConfig = VisualConfig()
     scoring: ScoringConfig = ScoringConfig()
+    sentient_log: SentientLogConfig = SentientLogConfig()
+    telemetry: TelemetryConfig = TelemetryConfig()
 
 
 def _load_one_env(env_path: Path) -> None:
@@ -123,6 +139,16 @@ def default_config_dict() -> dict[str, Any]:
             "baseline_window_days": 30,
             "min_expected_5_day_minutes": 60,
         },
+        "sentient_log": {
+            "enabled": True,
+            "model": "gpt-4o-mini",
+            "max_chars": 90,
+        },
+        "telemetry": {
+            "show_systemd_box": True,
+            "gap_alert_days": 3,
+            "show_vignette": True,
+        },
     }
 
 
@@ -140,6 +166,8 @@ def app_config_from_dict(raw: dict[str, Any]) -> AppConfig:
     config = AppConfig(
         visual=_normalize_visual(data["visual"]),
         scoring=ScoringConfig(**data["scoring"]),
+        sentient_log=SentientLogConfig(**data["sentient_log"]),
+        telemetry=TelemetryConfig(**data["telemetry"]),
     )
     validate_config(config)
     return config
@@ -186,3 +214,7 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("scoring.baseline_window_days must be at least recent_window_days")
     if config.scoring.min_expected_5_day_minutes <= 0:
         raise ValueError("scoring.min_expected_5_day_minutes must be positive")
+    if config.sentient_log.max_chars <= 0:
+        raise ValueError("sentient_log.max_chars must be positive")
+    if config.telemetry.gap_alert_days <= 0:
+        raise ValueError("telemetry.gap_alert_days must be positive")

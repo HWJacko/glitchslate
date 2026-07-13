@@ -14,6 +14,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.visual.active_gradient, ("#06b6d4", "#8b5cf6"))
         self.assertEqual(config.visual.width, 3840)
         self.assertEqual(config.scoring.recent_window_days, 5)
+        self.assertTrue(config.sentient_log.enabled)
+        self.assertEqual(config.sentient_log.model, "gpt-4o-mini")
+        self.assertTrue(config.telemetry.show_systemd_box)
+        self.assertEqual(config.telemetry.gap_alert_days, 3)
 
     def test_load_config_from_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

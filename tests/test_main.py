@@ -25,6 +25,8 @@ class MainPipelineTests(unittest.TestCase):
                 },
                 clear=True,
             ), patch.object(main, "load_dotenv", lambda: None), patch.object(
+                main, "generate_sentient_log", return_value="Crew output nominal."
+            ) as generate_log, patch.object(
                 main, "set_wallpaper", side_effect=fake_set_wallpaper
             ):
                 result = main.run_pipeline(
@@ -39,6 +41,30 @@ class MainPipelineTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertTrue(calls[0][1])
             self.assertTrue((Path(tmp) / "assets" / "wallpaper_current.png").exists())
+            generate_log.assert_called_once()
+
+    def test_dry_run_skips_sentient_log_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                "os.environ",
+                {
+                    "GLITCHSLATE_DB_PATH": str(Path(tmp) / "test.db"),
+                    "LOCAL_TIMEZONE": "Europe/London",
+                },
+                clear=True,
+            ), patch.object(main, "load_dotenv", lambda: None), patch.object(
+                main, "generate_sentient_log", return_value="Crew output nominal."
+            ) as generate_log, patch.object(main, "set_wallpaper", return_value=["set-wallpaper"]):
+                result = main.run_pipeline(
+                    db_path=str(Path(tmp) / "test.db"),
+                    dry_run=True,
+                    assets_dir=Path(tmp) / "assets",
+                    width=80,
+                    height=45,
+                )
+
+            self.assertEqual(result, 0)
+            generate_log.assert_not_called()
 
 
 if __name__ == "__main__":

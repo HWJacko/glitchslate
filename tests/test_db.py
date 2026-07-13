@@ -6,7 +6,20 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from config import ScoringConfig
-from db import Activity, calculate_daily_score, connect, get_sync_state, init_db, rolling_window_minutes, set_sync_state, upsert_activity
+from db import (
+    Activity,
+    calculate_daily_score,
+    connect,
+    current_gap_days,
+    get_cached_sentient_log,
+    get_sync_state,
+    init_db,
+    minutes_for_day,
+    rolling_window_minutes,
+    set_cached_sentient_log,
+    set_sync_state,
+    upsert_activity,
+)
 
 
 class DatabaseTests(unittest.TestCase):
@@ -91,6 +104,42 @@ class DatabaseTests(unittest.TestCase):
         self.assertAlmostEqual(score.baseline_daily_minutes, 350 / 30)
         self.assertAlmostEqual(score.expected_recent_minutes, 60)
         self.assertEqual(score.score, 83)
+
+    def test_gap_days_and_minutes_for_day(self) -> None:
+        self.add_activity("a", 10, 30)
+        self.assertEqual(minutes_for_day(self.conn, date(2026, 7, 10)), 30)
+        self.assertEqual(minutes_for_day(self.conn, date(2026, 7, 11)), 0)
+        self.assertEqual(current_gap_days(self.conn, end_day=date(2026, 7, 10)), 0)
+        self.assertEqual(current_gap_days(self.conn, end_day=date(2026, 7, 12)), 2)
+
+    def test_sentient_log_cache_roundtrip(self) -> None:
+        set_cached_sentient_log(
+            self.conn,
+            day="2026-07-13",
+            score=80,
+            streak_days=2,
+            today_minutes=30,
+            text="Systems nominal.",
+        )
+        self.assertEqual(
+            get_cached_sentient_log(
+                self.conn,
+                day="2026-07-13",
+                score=80,
+                streak_days=2,
+                today_minutes=30,
+            ),
+            "Systems nominal.",
+        )
+        self.assertIsNone(
+            get_cached_sentient_log(
+                self.conn,
+                day="2026-07-13",
+                score=79,
+                streak_days=2,
+                today_minutes=30,
+            )
+        )
 
     def test_rolling_window_minutes_handles_sparse_activity(self) -> None:
         self.add_activity("a", 10, 30)

@@ -14,3 +14,14 @@ scoring:
   recent_window_days: 5
   baseline_window_days: 30
   min_expected_5_day_minutes: 60
+
+
+sentient_log:
+  enabled: true
+  model: gpt-4o-mini
+  max_chars: 90
+
+telemetry:
+  show_systemd_box: true
+  gap_alert_days: 3
+  show_vignette: true
