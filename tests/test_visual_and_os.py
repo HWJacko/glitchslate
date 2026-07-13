@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from os_sync import set_wallpaper
-from visual_engine import calculate_glitch_factor, render_wallpaper
+from visual_engine import calculate_glitch_factor, render_wallpaper, system_status
 
 
 class VisualAndOsTests(unittest.TestCase):
@@ -15,19 +15,33 @@ class VisualAndOsTests(unittest.TestCase):
         self.assertEqual(calculate_glitch_factor(100), 0.0)
         self.assertEqual(calculate_glitch_factor(0), 1.0)
 
+    def test_status_bands(self) -> None:
+        self.assertEqual(system_status(95), "STABLE")
+        self.assertEqual(system_status(65), "DRIFTING")
+        self.assertEqual(system_status(35), "AT RISK")
+        self.assertEqual(system_status(10), "CRITICAL")
+
     def test_render_writes_timestamped_and_current_wallpapers(self) -> None:
+        points = [(f"2026-07-{day:02d}", day * 5) for day in range(1, 31)]
         with tempfile.TemporaryDirectory() as tmp:
             result = render_wallpaper(
                 score=50,
-                day="2026-07-13",
+                day="2026-07-30",
                 output_dir=tmp,
-                timestamp=datetime(2026, 7, 13, 12, 0, 1),
+                timestamp=datetime(2026, 7, 30, 12, 0, 1),
                 width=320,
                 height=180,
+                rolling_points=points,
+                expected_recent_minutes=100,
+                streak_days=3,
             )
             self.assertTrue(result.timestamped_path.exists())
             self.assertTrue(result.current_path.exists())
-            self.assertEqual(result.timestamped_path.name, "wallpaper_20260713_120001.png")
+            self.assertEqual(result.timestamped_path.name, "wallpaper_20260730_120001.png")
+            self.assertEqual(result.diagnostics.bar_count, 30)
+            self.assertEqual(result.diagnostics.latest_5_day_minutes, 150)
+            self.assertEqual(result.diagnostics.max_5_day_minutes, 150)
+            self.assertEqual(result.diagnostics.status, "DRIFTING")
 
     def test_os_sync_dry_run_does_not_call_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

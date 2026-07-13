@@ -36,7 +36,7 @@ def _workout_prompt(text: str) -> str:
     return (
         "Extract workout information from this message. Return only JSON with keys "
         "is_workout, activity_type, duration_minutes, intensity, notes. "
-        "Use is_workout=false when the text is not a workout check-in.\n\n"
+        "Use is_workout=false when the text is not a workout check-in. If the message describes sets, reps, weights, or bodyweight exercises but not duration, infer a conservative duration_minutes estimate from the described work.\n\n"
         f"Message: {text}"
     )
 
@@ -92,17 +92,76 @@ def parse_workout_with_gemini(text: str) -> ParsedWorkout:
     return json.loads(response.text)
 
 
+def _extract_openai_output_text(response: Any) -> str | None:
+    if isinstance(response, dict):
+        output_text = response.get("output_text")
+        output = response.get("output", [])
+    else:
+        output_text = getattr(response, "output_text", None)
+        output = getattr(response, "output", [])
+    if output_text:
+        return str(output_text)
+
+    for item in output:
+        if isinstance(item, dict):
+            contents = item.get("content", [])
+        else:
+            contents = getattr(item, "content", [])
+        for content in contents:
+            if isinstance(content, dict):
+                if content.get("type") == "output_text":
+                    return content.get("text")
+            elif getattr(content, "type", None) == "output_text":
+                return getattr(content, "text", None)
+    return None
+
+
+def _parse_workout_with_openai_http(text: str, *, model: str) -> ParsedWorkout:
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError("openai or requests is required for OpenAI parsing") from exc
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "input": _workout_prompt(text),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "workout_checkin",
+                    "strict": True,
+                    "schema": WORKOUT_SCHEMA,
+                }
+            },
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    output_text = _extract_openai_output_text(response.json())
+    if not output_text:
+        raise RuntimeError("OpenAI response did not include output_text")
+    return json.loads(output_text)
+
+
 def parse_workout_with_openai(
     text: str,
     *,
     client: Any | None = None,
     model: str | None = None,
 ) -> ParsedWorkout:
+    selected_model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     if client is None:
         try:
             from openai import OpenAI
-        except ImportError as exc:
-            raise RuntimeError("openai is required for OpenAI parsing") from exc
+        except ImportError:
+            return _parse_workout_with_openai_http(text, model=selected_model)
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -110,7 +169,7 @@ def parse_workout_with_openai(
         client = OpenAI(api_key=api_key)
 
     response = client.responses.create(
-        model=model or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        model=selected_model,
         input=_workout_prompt(text),
         text={
             "format": {
@@ -121,20 +180,7 @@ def parse_workout_with_openai(
             }
         },
     )
-    output_text = getattr(response, "output_text", None)
-    if not output_text:
-        output = getattr(response, "output", [])
-        for item in output:
-            if isinstance(item, dict):
-                contents = item.get("content", [])
-            else:
-                contents = getattr(item, "content", [])
-            for content in contents:
-                if isinstance(content, dict) and content.get("type") == "output_text":
-                    output_text = content.get("text")
-                    break
-            if output_text:
-                break
+    output_text = _extract_openai_output_text(response)
     if not output_text:
         raise RuntimeError("OpenAI response did not include output_text")
     return json.loads(output_text)
@@ -228,7 +274,7 @@ def sync_telegram(
         upsert_activity(conn, activity, tz=tz)
         inserted += 1
 
-    if highest_update_id is not None:
+    if highest_update_id is not None and not dry_run:
         set_sync_state(conn, "telegram_last_update_id", highest_update_id)
     return inserted
 

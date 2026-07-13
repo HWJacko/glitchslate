@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from config import DEFAULT_TIMEZONE, get_db_path, get_timezone
+from config import DEFAULT_TIMEZONE, ScoringConfig, get_db_path, get_timezone
 
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -32,6 +32,9 @@ class DailyScore:
     score: int
     streak_days: int
     total_minutes: int
+    recent_minutes: int = 0
+    baseline_daily_minutes: float = 0.0
+    expected_recent_minutes: float = 0.0
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -132,17 +135,63 @@ def set_sync_state(conn: sqlite3.Connection, key: str, value: str | int) -> None
     conn.commit()
 
 
-def _parse_date(value: str) -> date:
-    return date.fromisoformat(value)
+def _sum_minutes_between(conn: sqlite3.Connection, start_day: date, end_day: date) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(duration_minutes), 0) AS total_minutes
+        FROM activities
+        WHERE local_date >= ? AND local_date <= ?
+        """,
+        (start_day.isoformat(), end_day.isoformat()),
+    ).fetchone()
+    return int(row["total_minutes"])
 
 
-def _date_range_exclusive(start: date, end: date) -> list[date]:
-    days = []
-    current = start + timedelta(days=1)
-    while current < end:
-        days.append(current)
-        current += timedelta(days=1)
-    return days
+def _activity_count_for_day(conn: sqlite3.Connection, day: date) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS activity_count FROM activities WHERE local_date = ?",
+        (day.isoformat(),),
+    ).fetchone()
+    return int(row["activity_count"])
+
+
+def daily_minutes_map(
+    conn: sqlite3.Connection,
+    *,
+    start_day: date,
+    end_day: date,
+) -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT local_date, COALESCE(SUM(duration_minutes), 0) AS total_minutes
+        FROM activities
+        WHERE local_date >= ? AND local_date <= ?
+        GROUP BY local_date
+        """,
+        (start_day.isoformat(), end_day.isoformat()),
+    ).fetchall()
+    return {str(row["local_date"]): int(row["total_minutes"]) for row in rows}
+
+
+def rolling_window_minutes(
+    conn: sqlite3.Connection,
+    *,
+    end_day: date,
+    point_count: int = 30,
+    window_days: int = 5,
+) -> list[tuple[str, int]]:
+    first_bar_day = end_day - timedelta(days=point_count - 1)
+    first_needed_day = first_bar_day - timedelta(days=window_days - 1)
+    minutes_by_day = daily_minutes_map(conn, start_day=first_needed_day, end_day=end_day)
+    points: list[tuple[str, int]] = []
+    for offset in range(point_count):
+        bar_day = first_bar_day + timedelta(days=offset)
+        total = 0
+        for window_offset in range(window_days):
+            day = bar_day - timedelta(days=window_days - 1 - window_offset)
+            total += minutes_by_day.get(day.isoformat(), 0)
+        points.append((bar_day.isoformat(), total))
+    return points
 
 
 def calculate_daily_score(
@@ -150,13 +199,29 @@ def calculate_daily_score(
     *,
     today: date | None = None,
     timezone_name: str = DEFAULT_TIMEZONE,
+    scoring_config: ScoringConfig | None = None,
+    persist: bool = True,
 ) -> DailyScore:
     local_today = today or datetime.now(get_timezone(timezone_name)).date()
     today_key = local_today.isoformat()
+    config = scoring_config or ScoringConfig()
+
+    recent_start = local_today - timedelta(days=config.recent_window_days - 1)
+    baseline_start = local_today - timedelta(days=config.baseline_window_days - 1)
+
+    recent_minutes = _sum_minutes_between(conn, recent_start, local_today)
+    baseline_minutes = _sum_minutes_between(conn, baseline_start, local_today)
+    baseline_daily_minutes = baseline_minutes / config.baseline_window_days
+    expected_recent_minutes = max(
+        float(config.min_expected_5_day_minutes),
+        baseline_daily_minutes * config.recent_window_days,
+    )
+    score_value = (recent_minutes / expected_recent_minutes) * 100 if expected_recent_minutes else 0
+    score = int(round(max(0, min(100, score_value))))
 
     previous = conn.execute(
         """
-        SELECT date, score, streak_days
+        SELECT streak_days
         FROM daily_state
         WHERE date < ?
         ORDER BY date DESC
@@ -164,48 +229,32 @@ def calculate_daily_score(
         """,
         (today_key,),
     ).fetchone()
-
-    if previous is None:
-        previous_score = 100
-        previous_date = local_today - timedelta(days=1)
-        previous_streak_days = 0
-    else:
-        previous_score = int(previous["score"])
-        previous_date = _parse_date(str(previous["date"]))
-        previous_streak_days = int(previous["streak_days"])
-
-    missed_days = len(_date_range_exclusive(previous_date, local_today))
-    decayed_previous_score = max(0, previous_score - (15 * missed_days))
-
-    row = conn.execute(
-        """
-        SELECT COALESCE(SUM(duration_minutes), 0) AS total_minutes,
-               COUNT(*) AS activity_count
-        FROM activities
-        WHERE local_date = ?
-        """,
-        (today_key,),
-    ).fetchone()
-    total_minutes = int(row["total_minutes"])
-    activity_count = int(row["activity_count"])
-
-    score_value = max(0, min(100, decayed_previous_score - 15 + (total_minutes * 0.5)))
-    score = int(round(score_value))
+    previous_streak_days = int(previous["streak_days"]) if previous else 0
+    activity_count = _activity_count_for_day(conn, local_today)
     streak_days = previous_streak_days + 1 if activity_count > 0 else 0
 
-    conn.execute(
-        """
-        INSERT INTO daily_state (date, score, streak_days)
-        VALUES (?, ?, ?)
-        ON CONFLICT(date) DO UPDATE SET
-            score = excluded.score,
-            streak_days = excluded.streak_days,
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (today_key, score, streak_days),
+    if persist:
+        conn.execute(
+            """
+            INSERT INTO daily_state (date, score, streak_days)
+            VALUES (?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                score = excluded.score,
+                streak_days = excluded.streak_days,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (today_key, score, streak_days),
+        )
+        conn.commit()
+    return DailyScore(
+        date=today_key,
+        score=score,
+        streak_days=streak_days,
+        total_minutes=recent_minutes,
+        recent_minutes=recent_minutes,
+        baseline_daily_minutes=baseline_daily_minutes,
+        expected_recent_minutes=expected_recent_minutes,
     )
-    conn.commit()
-    return DailyScore(date=today_key, score=score, streak_days=streak_days, total_minutes=total_minutes)
 
 
 def get_daily_score(conn: sqlite3.Connection, day: date | None = None) -> DailyScore | None:
@@ -220,9 +269,11 @@ def get_daily_score(conn: sqlite3.Connection, day: date | None = None) -> DailyS
         "SELECT COALESCE(SUM(duration_minutes), 0) AS total_minutes FROM activities WHERE local_date = ?",
         (day_key,),
     ).fetchone()
+    total_minutes = int(minutes_row["total_minutes"])
     return DailyScore(
         date=str(row["date"]),
         score=int(row["score"]),
         streak_days=int(row["streak_days"]),
-        total_minutes=int(minutes_row["total_minutes"]),
+        total_minutes=total_minutes,
+        recent_minutes=total_minutes,
     )

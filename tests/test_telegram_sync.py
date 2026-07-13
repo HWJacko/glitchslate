@@ -112,6 +112,37 @@ class TelegramSyncTests(unittest.TestCase):
         self.assertEqual(row["external_id"], "77")
         self.assertEqual(row["duration_minutes"], 45)
 
+
+    def test_dry_run_does_not_persist_offset_or_activity(self) -> None:
+        def request_get(url, params, timeout):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 9,
+                        "message": {
+                            "message_id": 78,
+                            "date": 1783929600,
+                            "from": {"id": 123},
+                            "text": "45 minutes strength",
+                        },
+                    }
+                ],
+            }
+
+        count = sync_telegram(
+            self.conn,
+            token="token",
+            allowed_user_id=123,
+            parser=lambda text: {"is_workout": True, "duration_minutes": 45},
+            request_get=request_get,
+            dry_run=True,
+        )
+        self.assertEqual(count, 0)
+        self.assertIsNone(get_sync_state(self.conn, "telegram_last_update_id"))
+        rows = self.conn.execute("SELECT COUNT(*) AS count FROM activities").fetchone()
+        self.assertEqual(rows["count"], 0)
+
     def test_openai_parser_uses_structured_output_schema(self) -> None:
         client = FakeOpenAIClient()
         parsed = parse_workout_with_openai("45 minutes strength", client=client, model="test-model")

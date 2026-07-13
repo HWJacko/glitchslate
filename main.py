@@ -3,15 +3,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-from config import get_timezone, load_dotenv
-from db import calculate_daily_score, connect, init_db
+from config import get_timezone, load_config, load_dotenv, parse_resolution
+from db import calculate_daily_score, connect, init_db, rolling_window_minutes, set_sync_state
 from os_sync import cleanup_old_wallpapers, set_wallpaper
 from strava_sync import sync_strava
 from telegram_sync import sync_telegram
-from visual_engine import HEIGHT, WIDTH, render_wallpaper
+from visual_engine import render_wallpaper
 
 
 def _warn(message: str) -> None:
@@ -22,21 +22,32 @@ def run_pipeline(
     *,
     db_path: str | None = None,
     dry_run: bool = False,
+    apply_wallpaper: bool = True,
     assets_dir: str | Path = "assets",
-    width: int = WIDTH,
-    height: int = HEIGHT,
+    width: int | None = None,
+    height: int | None = None,
+    telegram_replay_from: int | None = None,
+    config_path: str | Path | None = None,
+    resolution: str | None = None,
 ) -> int:
     load_dotenv()
+    app_config = load_config(config_path)
+    configured_width, configured_height = parse_resolution(resolution or app_config.visual.target_resolution)
+    render_width = width or configured_width
+    render_height = height or configured_height
+
     conn = connect(db_path)
     init_db(conn)
     timezone_name = os.getenv("LOCAL_TIMEZONE", "Europe/London")
-    today = None
-    today_key = datetime.now(get_timezone(timezone_name)).date().isoformat()
+    today = datetime.now(get_timezone(timezone_name)).date()
+    today_key = today.isoformat()
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_user = os.getenv("TELEGRAM_ALLOWED_USER_ID")
     if telegram_token and telegram_user:
         try:
+            if telegram_replay_from is not None and not dry_run:
+                set_sync_state(conn, "telegram_last_update_id", max(0, telegram_replay_from - 1))
             telegram_count = sync_telegram(
                 conn,
                 token=telegram_token,
@@ -69,39 +80,90 @@ def run_pipeline(
     else:
         _warn("Strava sync skipped: Strava credentials are incomplete")
 
-    score = calculate_daily_score(conn, today=today, timezone_name=timezone_name)
-    result = render_wallpaper(score=score.score, day=today_key, output_dir=assets_dir, width=width, height=height)
-    cleanup_old_wallpapers(assets_dir)
+    score = calculate_daily_score(
+        conn,
+        today=today,
+        timezone_name=timezone_name,
+        scoring_config=app_config.scoring,
+        persist=not dry_run,
+    )
+    chart_points = rolling_window_minutes(
+        conn,
+        end_day=today,
+        point_count=app_config.scoring.baseline_window_days,
+        window_days=app_config.scoring.recent_window_days,
+    )
+    result = render_wallpaper(
+        score=score.score,
+        day=today_key,
+        output_dir=assets_dir,
+        width=render_width,
+        height=render_height,
+        visual_config=app_config.visual,
+        rolling_points=chart_points,
+        streak_days=score.streak_days,
+        expected_recent_minutes=score.expected_recent_minutes,
+    )
+    if not app_config.visual.keep_archive_images:
+        cleanup_old_wallpapers(assets_dir, older_than_hours=app_config.visual.archive_retention_hours)
 
     try:
-        command = set_wallpaper(result.timestamped_path, dry_run=dry_run)
+        command = set_wallpaper(result.timestamped_path, dry_run=dry_run or not apply_wallpaper)
     except Exception as exc:
         _warn(f"OS sync warning: {exc}")
         command = []
 
     print(
         f"score={score.score} streak={score.streak_days} minutes={score.total_minutes} "
+        f"recent_minutes={score.recent_minutes} "
+        f"baseline_daily_minutes={score.baseline_daily_minutes:.2f} "
+        f"expected_recent_minutes={score.expected_recent_minutes:.2f} "
         f"glitch_factor={result.glitch_factor:.2f} wallpaper={result.timestamped_path}"
+    )
+    print(
+        "wallpaper diagnostics: "
+        f"backend={result.diagnostics.backend} "
+        f"bar_count={result.diagnostics.bar_count} "
+        f"latest_5_day_minutes={result.diagnostics.latest_5_day_minutes} "
+        f"max_5_day_minutes={result.diagnostics.max_5_day_minutes} "
+        f"bar_scale_minutes={result.diagnostics.bar_scale_minutes:.2f} "
+        f"status={result.diagnostics.status}"
     )
     if dry_run and command:
         print("dry-run wallpaper command:", " ".join(command))
+    elif not apply_wallpaper and command:
+        print("no-apply wallpaper command:", " ".join(command))
+    conn.close()
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Glitchslate pipeline.")
     parser.add_argument("--db", default=None)
+    parser.add_argument("--config", default=None)
     parser.add_argument("--assets-dir", default="assets")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--width", type=int, default=WIDTH)
-    parser.add_argument("--height", type=int, default=HEIGHT)
+    parser.add_argument("--no-apply", action="store_true", help="Ingest and render, but do not change the desktop wallpaper.")
+    parser.add_argument(
+        "--telegram-replay-from",
+        type=int,
+        default=None,
+        help="Reset Telegram polling offset to this update id before syncing.",
+    )
+    parser.add_argument("--width", type=int, default=None)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--resolution", default=None)
     args = parser.parse_args()
     return run_pipeline(
         db_path=args.db,
         dry_run=args.dry_run,
+        apply_wallpaper=not args.no_apply,
         assets_dir=args.assets_dir,
         width=args.width,
         height=args.height,
+        telegram_replay_from=args.telegram_replay_from,
+        config_path=args.config,
+        resolution=args.resolution,
     )
 
 

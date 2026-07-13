@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import random
 import shutil
 import struct
 import zlib
@@ -10,9 +8,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from config import VisualConfig
+
 
 WIDTH = 3840
 HEIGHT = 2160
+
+
+@dataclass(frozen=True)
+class RenderDiagnostics:
+    backend: str
+    bar_count: int
+    latest_5_day_minutes: int
+    max_5_day_minutes: int
+    bar_scale_minutes: float
+    status: str
 
 
 @dataclass(frozen=True)
@@ -21,83 +31,43 @@ class RenderResult:
     current_path: Path
     score: int
     glitch_factor: float
+    diagnostics: RenderDiagnostics
 
 
 def calculate_glitch_factor(score: int) -> float:
     return max(0.0, min(1.0, (100 - score) / 100))
 
 
-def _seed_for(day: str, score: int, seed: int | None = None) -> int:
-    if seed is not None:
-        return seed
-    digest = hashlib.sha256(f"{day}:{score}".encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big")
+def system_status(score: int) -> str:
+    if score >= 80:
+        return "STABLE"
+    if score >= 50:
+        return "DRIFTING"
+    if score >= 20:
+        return "AT RISK"
+    return "CRITICAL"
 
 
-def _base_canvas(width: int, height: int):
-    import numpy as np
-
-    x = np.linspace(0, 1, width, dtype=np.float32)
-    y = np.linspace(0, 1, height, dtype=np.float32)
-    xx, yy = np.meshgrid(x, y)
-    red = 24 + (xx * 80) + (yy * 20)
-    green = 32 + (yy * 120)
-    blue = 48 + ((1 - xx) * 160)
-    canvas = np.stack([red, green, blue], axis=2)
-
-    line_mask = ((np.sin((xx * 18) + (yy * 10)) > 0.985) | (np.cos((xx * 12) - (yy * 16)) > 0.99))
-    canvas[line_mask] = [235, 245, 240]
-    return np.clip(canvas, 0, 255).astype(np.uint8)
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = value.lstrip("#")
+    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
 
-def _apply_glitch(canvas, glitch_factor: float, rng):
-    import numpy as np
+def _lerp(a: int, b: int, t: float) -> int:
+    return int(round(a + (b - a) * t))
 
-    if glitch_factor <= 0:
-        return canvas
 
-    height, width, _ = canvas.shape
-    glitched = canvas.copy()
-    band_count = max(1, int(6 + glitch_factor * 34))
-    max_shift = max(1, int(width * 0.08 * glitch_factor))
+def _lerp_color(start: tuple[int, int, int], end: tuple[int, int, int], t: float) -> tuple[int, int, int]:
+    return _lerp(start[0], end[0], t), _lerp(start[1], end[1], t), _lerp(start[2], end[2], t)
 
-    for _ in range(band_count):
-        band_height = int(rng.integers(8, max(12, int(80 + 180 * glitch_factor))))
-        y = int(rng.integers(0, max(1, height - band_height)))
-        shift = int(rng.integers(-max_shift, max_shift + 1))
-        channel = int(rng.integers(0, 3))
-        glitched[y : y + band_height, :, channel] = np.roll(
-            glitched[y : y + band_height, :, channel],
-            shift,
-            axis=1,
-        )
 
-    noise_bars = max(1, int(glitch_factor * 16))
-    for _ in range(noise_bars):
-        band_height = int(rng.integers(4, max(8, int(24 + 90 * glitch_factor))))
-        y = int(rng.integers(0, max(1, height - band_height)))
-        shade = int(rng.integers(0, 255))
-        alpha = min(0.85, 0.2 + glitch_factor * 0.55)
-        glitched[y : y + band_height] = (
-            glitched[y : y + band_height] * (1 - alpha) + shade * alpha
-        ).astype(np.uint8)
-
-    block_count = max(1, int(glitch_factor * 12))
-    for _ in range(block_count):
-        block_w = int(rng.integers(120, max(130, int(360 + 900 * glitch_factor))))
-        block_h = int(rng.integers(80, max(90, int(220 + 500 * glitch_factor))))
-        x = int(rng.integers(0, max(1, width - block_w)))
-        y = int(rng.integers(0, max(1, height - block_h)))
-        region = glitched[y : y + block_h, x : x + block_w]
-        region_h, region_w, _ = region.shape
-        factor = int(rng.integers(6, max(7, int(8 + 30 * glitch_factor))))
-        small = region[::factor, ::factor]
-        if small.size == 0:
-            continue
-        pixelated = np.repeat(np.repeat(small, factor, axis=0), factor, axis=1)
-        glitched[y : y + region_h, x : x + region_w] = pixelated[:region_h, :region_w]
-
-    return glitched
+def _format_minutes(minutes: int) -> str:
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    if mins == 0:
+        return f"{hours}h"
+    return f"{hours}h{mins:02d}"
 
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
@@ -121,44 +91,51 @@ def _write_png(path: Path, width: int, height: int, pixels: bytes) -> None:
     path.write_bytes(png)
 
 
-def _fallback_pixels(width: int, height: int, score: int, day: str, seed: int | None) -> bytes:
-    factor = calculate_glitch_factor(score)
-    rng = random.Random(_seed_for(day, score, seed))
-    pixels = bytearray(width * height * 3)
-    for y in range(height):
-        for x in range(width):
-            idx = (y * width + x) * 3
-            pixels[idx] = int(24 + (x / max(1, width - 1)) * 80 + (y / max(1, height - 1)) * 20)
-            pixels[idx + 1] = int(32 + (y / max(1, height - 1)) * 120)
-            pixels[idx + 2] = int(48 + (1 - (x / max(1, width - 1))) * 160)
+def _fallback_pixels(width: int, height: int, config: VisualConfig) -> bytes:
+    bg = _hex_to_rgb(config.bg_color)
+    return bytes(bg) * width * height
 
-    if factor <= 0:
-        return bytes(pixels)
 
-    band_count = max(1, int(4 + factor * 16))
-    max_shift = max(1, int(width * 0.08 * factor))
-    for _ in range(band_count):
-        band_height = rng.randint(2, max(3, int(12 + 40 * factor)))
-        y0 = rng.randint(0, max(0, height - band_height))
-        shift = rng.randint(-max_shift, max_shift)
-        channel = rng.randint(0, 2)
-        for y in range(y0, min(height, y0 + band_height)):
-            row = [pixels[(y * width + x) * 3 + channel] for x in range(width)]
-            for x in range(width):
-                pixels[(y * width + x) * 3 + channel] = row[(x - shift) % width]
+def _font(size: int):
+    from PIL import ImageFont
 
-    noise_bars = max(1, int(factor * 8))
-    for _ in range(noise_bars):
-        band_height = rng.randint(1, max(2, int(8 + 30 * factor)))
-        y0 = rng.randint(0, max(0, height - band_height))
-        shade = rng.randint(0, 255)
-        for y in range(y0, min(height, y0 + band_height)):
-            for x in range(width):
-                idx = (y * width + x) * 3
-                pixels[idx] = shade
-                pixels[idx + 1] = shade
-                pixels[idx + 2] = shade
-    return bytes(pixels)
+    candidates = [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _rounded_rectangle(draw, xy, radius: int, fill, outline=None, width: int = 1) -> None:
+    try:
+        draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
+    except AttributeError:
+        draw.rectangle(xy, fill=fill, outline=outline)
+
+
+def _draw_vertical_gradient(draw, xy, radius: int, start_color, end_color) -> None:
+    x0, y0, x1, y1 = [int(v) for v in xy]
+    height = max(1, y1 - y0)
+    for y in range(y0, y1 + 1):
+        t = (y - y0) / height
+        color = _lerp_color(start_color, end_color, t)
+        draw.line([(x0, y), (x1, y)], fill=color)
+    _rounded_rectangle(draw, xy, radius=radius, fill=None, outline=start_color, width=max(1, int((x1 - x0) * 0.05)))
+
+
+def _label_indices(values: list[int]) -> set[int]:
+    indices = {len(values) - 1}
+    indices.update(range(4, len(values), 5))
+    for index in range(1, len(values) - 1):
+        if values[index] > 0 and values[index] >= values[index - 1] and values[index] >= values[index + 1]:
+            indices.add(index)
+    return indices
 
 
 def render_wallpaper(
@@ -170,34 +147,126 @@ def render_wallpaper(
     width: int = WIDTH,
     height: int = HEIGHT,
     seed: int | None = None,
+    visual_config: VisualConfig | None = None,
+    rolling_points: list[tuple[str, int]] | None = None,
+    streak_days: int = 0,
+    expected_recent_minutes: float = 60.0,
 ) -> RenderResult:
+    config = visual_config or VisualConfig(target_resolution=f"{width}x{height}")
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
-    factor = calculate_glitch_factor(score)
     stamp = (timestamp or datetime.now()).strftime("%Y%m%d_%H%M%S")
     timestamped = output_path / f"wallpaper_{stamp}.png"
     current = output_path / "wallpaper_current.png"
 
+    points = rolling_points or [(day, 0) for _ in range(30)]
+    values = [minutes for _, minutes in points]
+    latest = values[-1] if values else 0
+    max_minutes = max(values) if values else 0
+    bar_scale = max(float(expected_recent_minutes), float(max_minutes), 1.0)
+    status = system_status(score)
+
     try:
-        import numpy as np
-        from PIL import Image
+        from PIL import Image, ImageDraw
     except ImportError:
-        pixels = _fallback_pixels(width, height, score, day, seed)
-        _write_png(timestamped, width, height, pixels)
+        _write_png(timestamped, width, height, _fallback_pixels(width, height, config))
+        backend = "stdlib"
     else:
-        rng = np.random.default_rng(_seed_for(day, score, seed))
-        canvas = _base_canvas(width, height)
-        canvas = _apply_glitch(canvas, factor, rng)
-        image = Image.fromarray(canvas, mode="RGB")
+        bg = _hex_to_rgb(config.bg_color)
+        grid = _hex_to_rgb(config.grid_color)
+        empty = _hex_to_rgb(config.empty_color)
+        text = _hex_to_rgb(config.text_color)
+        muted = _hex_to_rgb(config.muted_text_color)
+        alert = _hex_to_rgb(config.alert_color)
+        gradient_start = _hex_to_rgb(config.active_gradient[0])
+        gradient_end = _hex_to_rgb(config.active_gradient[1])
+
+        image = Image.new("RGB", (width, height), bg)
+        draw = ImageDraw.Draw(image)
+        title_font = _font(max(18, int(height * 0.026)))
+        meta_font = _font(max(14, int(height * 0.021)))
+        label_font = _font(max(10, int(height * 0.015)))
+        small_font = _font(max(9, int(height * 0.012)))
+
+        chart_left = int(width * 0.09)
+        chart_right = int(width * 0.91)
+        chart_top = int(height * 0.38)
+        chart_bottom = int(height * 0.80)
+        chart_width = chart_right - chart_left
+        chart_height = chart_bottom - chart_top
+
+        for step in range(6):
+            y = chart_bottom - int(chart_height * step / 5)
+            draw.line((chart_left, y, chart_right, y), fill=grid, width=max(1, width // 960))
+
+        count = max(1, len(points))
+        slot = chart_width / count
+        bar_width = max(4, int(slot * 0.62))
+        radius = max(3, bar_width // 2)
+        label_every = _label_indices(values)
+
+        for index, (point_day, minutes) in enumerate(points):
+            center_x = chart_left + (index + 0.5) * slot
+            x0 = int(center_x - bar_width / 2)
+            x1 = int(center_x + bar_width / 2)
+            empty_y0 = chart_top
+            empty_y1 = chart_bottom
+            _rounded_rectangle(draw, (x0, empty_y0, x1, empty_y1), radius=radius, fill=empty)
+            if minutes > 0:
+                ratio = min(1.0, minutes / bar_scale)
+                fill_height = max(24, int(chart_height * ratio))
+                y0 = chart_bottom - fill_height
+                _draw_vertical_gradient(draw, (x0, y0, x1, chart_bottom), radius=radius, start_color=gradient_start, end_color=gradient_end)
+            if index in label_every and minutes > 0:
+                label = _format_minutes(minutes)
+                bbox = draw.textbbox((0, 0), label, font=label_font)
+                lx = int(center_x - (bbox[2] - bbox[0]) / 2)
+                ly = chart_top - int(height * 0.035)
+                draw.text((lx, ly), label, fill=text if index == count - 1 else muted, font=label_font)
+            if index % 5 == 4 or index == count - 1:
+                day_label = point_day[5:]
+                bbox = draw.textbbox((0, 0), day_label, font=small_font)
+                draw.text((int(center_x - (bbox[2] - bbox[0]) / 2), chart_bottom + int(height * 0.02)), day_label, fill=muted, font=small_font)
+
+        status_color = alert if score < 50 else text
+        header_x = int(width * 0.07)
+        header_y = int(height * 0.08)
+        lines = [
+            "// GLITCHSLATE TELEMETRY CORE v1.0 //",
+            "-------------------------------------------",
+            f"CURRENT SCORE : [ {score:3d} / 100  ]",
+            f"ACTIVE STREAK : [ {streak_days:3d} DAYS   ]",
+            f"5-DAY VOLUME  : [ {_format_minutes(latest):>8} ]",
+            f"SYSTEM STATUS : [ {status:<9} ]",
+        ]
+        for offset, line in enumerate(lines):
+            fill = status_color if "SYSTEM STATUS" in line else text if offset in {0, 2, 3, 4} else muted
+            draw.text((header_x, header_y + offset * int(height * 0.04)), line, fill=fill, font=title_font if offset == 0 else meta_font)
+
+        footer = f"ROLLING 5-DAY TOTALS // TARGET {int(round(expected_recent_minutes))}m // WINDOW END {day}"
+        draw.text((chart_left, int(height * 0.88)), footer, fill=muted, font=small_font)
         image.save(timestamped)
+        backend = "pillow"
 
     shutil.copyfile(timestamped, current)
-    return RenderResult(timestamped_path=timestamped, current_path=current, score=score, glitch_factor=factor)
+    return RenderResult(
+        timestamped_path=timestamped,
+        current_path=current,
+        score=score,
+        glitch_factor=calculate_glitch_factor(score),
+        diagnostics=RenderDiagnostics(
+            backend=backend,
+            bar_count=len(points),
+            latest_5_day_minutes=latest,
+            max_5_day_minutes=max_minutes,
+            bar_scale_minutes=bar_scale,
+            status=status,
+        ),
+    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Render a Glitchslate wallpaper.")
+    parser = argparse.ArgumentParser(description="Render a Glitchslate telemetry wallpaper.")
     parser.add_argument("--score", type=int, required=True)
     parser.add_argument("--date", required=True)
     parser.add_argument("--output-dir", default="assets")
@@ -212,6 +281,15 @@ def main() -> int:
         height=args.height,
     )
     print(result.timestamped_path)
+    print(
+        "diagnostics="
+        f"backend={result.diagnostics.backend} "
+        f"bar_count={result.diagnostics.bar_count} "
+        f"latest_5_day_minutes={result.diagnostics.latest_5_day_minutes} "
+        f"max_5_day_minutes={result.diagnostics.max_5_day_minutes} "
+        f"bar_scale_minutes={result.diagnostics.bar_scale_minutes:.2f} "
+        f"status={result.diagnostics.status}"
+    )
     return 0
 
 

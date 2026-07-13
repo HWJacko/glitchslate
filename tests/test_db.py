@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from db import Activity, calculate_daily_score, connect, get_sync_state, init_db, set_sync_state, upsert_activity
+from config import ScoringConfig
+from db import Activity, calculate_daily_score, connect, get_sync_state, init_db, rolling_window_minutes, set_sync_state, upsert_activity
 
 
 class DatabaseTests(unittest.TestCase):
@@ -19,6 +19,18 @@ class DatabaseTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
         self.tmpdir.cleanup()
+
+    def add_activity(self, external_id: str, day: int, minutes: int) -> None:
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="telegram",
+                external_id=external_id,
+                timestamp=datetime(2026, 7, day, 9, 0, tzinfo=timezone.utc),
+                activity_type="workout",
+                duration_minutes=minutes,
+            ),
+        )
 
     def test_init_creates_tables(self) -> None:
         rows = self.conn.execute(
@@ -46,32 +58,59 @@ class DatabaseTests(unittest.TestCase):
         set_sync_state(self.conn, "telegram_last_update_id", 123)
         self.assertEqual(get_sync_state(self.conn, "telegram_last_update_id"), "123")
 
-    def test_scoring_is_idempotent_on_same_day(self) -> None:
-        upsert_activity(
-            self.conn,
-            Activity(
-                source="telegram",
-                external_id="1",
-                timestamp=datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc),
-                activity_type="yoga",
-                duration_minutes=30,
-            ),
-        )
+    def test_rolling_score_is_idempotent_on_same_day(self) -> None:
+        self.add_activity("1", 13, 30)
         first = calculate_daily_score(self.conn, today=date(2026, 7, 13))
         second = calculate_daily_score(self.conn, today=date(2026, 7, 13))
         self.assertEqual(first.score, second.score)
-        self.assertEqual(second.score, 100)
+        self.assertEqual(second.score, 50)
+        self.assertEqual(second.recent_minutes, 30)
+        self.assertEqual(second.expected_recent_minutes, 60)
         self.assertEqual(second.streak_days, 1)
 
-    def test_scoring_applies_cumulative_missed_day_decay(self) -> None:
-        self.conn.execute(
-            "INSERT INTO daily_state (date, score, streak_days) VALUES (?, ?, ?)",
-            ("2026-07-10", 100, 3),
-        )
-        self.conn.commit()
+    def test_rolling_score_caps_at_100_when_recent_minutes_exceed_target(self) -> None:
+        self.add_activity("1", 13, 120)
         score = calculate_daily_score(self.conn, today=date(2026, 7, 13))
-        self.assertEqual(score.score, 55)
+        self.assertEqual(score.score, 100)
+        self.assertEqual(score.recent_minutes, 120)
+
+    def test_rolling_score_deteriorates_after_five_inactive_days(self) -> None:
+        self.add_activity("1", 7, 60)
+        score = calculate_daily_score(self.conn, today=date(2026, 7, 13))
+        self.assertEqual(score.score, 0)
+        self.assertEqual(score.recent_minutes, 0)
         self.assertEqual(score.streak_days, 0)
+
+    def test_rolling_score_uses_30_day_baseline_when_above_minimum(self) -> None:
+        config = ScoringConfig(recent_window_days=5, baseline_window_days=30, min_expected_5_day_minutes=60)
+        for offset, day in enumerate(range(14, 19), start=1):
+            self.add_activity(f"old-{offset}", day, 60)
+        self.add_activity("recent", 28, 50)
+        score = calculate_daily_score(self.conn, today=date(2026, 7, 28), scoring_config=config)
+        self.assertEqual(score.recent_minutes, 50)
+        self.assertAlmostEqual(score.baseline_daily_minutes, 350 / 30)
+        self.assertAlmostEqual(score.expected_recent_minutes, 60)
+        self.assertEqual(score.score, 83)
+
+    def test_rolling_window_minutes_handles_sparse_activity(self) -> None:
+        self.add_activity("a", 10, 30)
+        self.add_activity("b", 13, 20)
+        points = rolling_window_minutes(self.conn, end_day=date(2026, 7, 13), point_count=5, window_days=5)
+        self.assertEqual([day for day, _ in points], [
+            "2026-07-09",
+            "2026-07-10",
+            "2026-07-11",
+            "2026-07-12",
+            "2026-07-13",
+        ])
+        self.assertEqual([minutes for _, minutes in points], [0, 30, 30, 30, 50])
+
+    def test_dry_run_score_does_not_persist_daily_state(self) -> None:
+        self.add_activity("1", 13, 30)
+        score = calculate_daily_score(self.conn, today=date(2026, 7, 13), persist=False)
+        self.assertEqual(score.score, 50)
+        row = self.conn.execute("SELECT COUNT(*) AS count FROM daily_state").fetchone()
+        self.assertEqual(row["count"], 0)
 
 
 if __name__ == "__main__":
