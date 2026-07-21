@@ -18,15 +18,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.sentient_log.model, "gpt-4o-mini")
         self.assertTrue(config.telemetry.show_systemd_box)
         self.assertEqual(config.telemetry.gap_alert_days, 3)
+        self.assertFalse(config.telegram_archive.enabled)
+        self.assertEqual(config.telegram_archive.blank_lookback_days, 28)
 
     def test_load_config_from_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.yaml"
-            path.write_text("visual:\n  target_resolution: 800x600\n  bg_color: '#000000'\n", encoding="utf-8")
+            path.write_text(
+                "visual:\n  target_resolution: 800x600\n  bg_color: '#000000'\n"
+                "telegram_archive:\n  enabled: true\n  blank_lookback_days: 7\n",
+                encoding="utf-8",
+            )
             config = load_config(path)
             self.assertEqual(config.visual.bg_color, "#000000")
             self.assertEqual(config.visual.width, 800)
             self.assertEqual(config.visual.height, 600)
+            self.assertTrue(config.telegram_archive.enabled)
+            self.assertEqual(config.telegram_archive.blank_lookback_days, 7)
 
     def test_invalid_color_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

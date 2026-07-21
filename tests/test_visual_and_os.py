@@ -30,7 +30,16 @@ class VisualAndOsTests(unittest.TestCase):
         self.assertIn("DEGRADED", systemd_status_lines(0, 3)[1])
 
     def test_render_writes_timestamped_and_current_wallpapers(self) -> None:
-        points = [(f"2026-07-{day:02d}", day * 5) for day in range(1, 31)]
+        points = [
+            {
+                "day": f"2026-07-{day:02d}",
+                "run_points": day * 3 if day % 2 == 0 else 0,
+                "other_points": day * 2,
+                "total_points": day * 5,
+                "is_best": day == 30,
+            }
+            for day in range(1, 31)
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             result = render_wallpaper(
                 score=50,
@@ -39,21 +48,30 @@ class VisualAndOsTests(unittest.TestCase):
                 timestamp=datetime(2026, 7, 30, 12, 0, 1),
                 width=320,
                 height=180,
-                rolling_points=points,
-                expected_recent_minutes=100,
+                chart_points=points,
+                expected_recent_points=100,
                 streak_days=3,
-                today_minutes=25,
+                streak_pending=True,
+                today_points=25,
                 gap_days=0,
+                last_run_details={
+                    "day": "2026-07-30",
+                    "distance_km": 4.2,
+                    "duration_minutes": 25,
+                    "pace_min_per_km": 5.95,
+                    "points": 1300,
+                    "elevation_m": 12,
+                },
                 sentient_log="Crew output nominal; systems remain within baseline.",
             )
             self.assertTrue(result.timestamped_path.exists())
             self.assertTrue(result.current_path.exists())
             self.assertEqual(result.timestamped_path.name, "wallpaper_20260730_120001.png")
             self.assertEqual(result.diagnostics.bar_count, 30)
-            self.assertEqual(result.diagnostics.latest_5_day_minutes, 150)
-            self.assertEqual(result.diagnostics.max_5_day_minutes, 150)
+            self.assertEqual(result.diagnostics.latest_day_points, 150)
+            self.assertEqual(result.diagnostics.max_day_points, 150)
             self.assertEqual(result.diagnostics.status, "DRIFTING")
-            self.assertEqual(result.diagnostics.today_minutes, 25)
+            self.assertEqual(result.diagnostics.today_points, 25)
             self.assertEqual(result.diagnostics.gap_days, 0)
             self.assertEqual(result.diagnostics.vignette_mode, "neutral")
             self.assertTrue(result.diagnostics.sentient_log_present)

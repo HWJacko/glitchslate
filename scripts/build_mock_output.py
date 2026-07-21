@@ -18,10 +18,13 @@ from db import (
     calculate_daily_score,
     connect,
     current_gap_days,
+    daily_chart_points,
     daily_minutes_map,
+    daily_points_map,
+    get_last_run_details,
     init_db,
     minutes_for_day,
-    rolling_window_minutes,
+    points_for_day,
     upsert_activity,
 )
 from sentient_log import fallback_sentient_log
@@ -82,6 +85,28 @@ def mock_entries(end_day: date = DEFAULT_END_DAY) -> list[MockEntry]:
                     "source_shape": "telegram_message" if source == "telegram" else "strava_activity",
                     "day_offset": offset,
                     "notes": notes,
+                    **(
+                        {
+                            "type": "Run",
+                            "sport_type": "Run",
+                            "moving_time": minutes * 60,
+                            "elapsed_time": minutes * 62,
+                            "distance": minutes * 160,
+                            "average_speed": (minutes * 160) / (minutes * 60),
+                            "total_elevation_gain": max(4, minutes * 0.45),
+                        }
+                        if source == "strava"
+                        else {
+                            "parser_result": {
+                                "is_workout": True,
+                                "activity_type": activity_type,
+                                "duration_minutes": minutes,
+                                "intensity": intensity,
+                                "notes": notes,
+                                "exercises": [],
+                            }
+                        }
+                    ),
                 },
             }
         )
@@ -138,18 +163,19 @@ def build_mock_output(
         scoring_config=app_config.scoring,
         persist=True,
     )
-    chart_points = rolling_window_minutes(
+    chart_points = daily_chart_points(
         conn,
         end_day=end_day,
         point_count=app_config.scoring.baseline_window_days,
-        window_days=app_config.scoring.recent_window_days,
     )
     today_minutes = minutes_for_day(conn, end_day)
+    today_points = points_for_day(conn, end_day)
     gap_days = current_gap_days(conn, end_day=end_day)
+    last_run_details = get_last_run_details(conn)
     sentient_log = fallback_sentient_log(
         score=score.score,
         streak_days=score.streak_days,
-        today_minutes=today_minutes,
+        today_points=today_points,
         max_chars=app_config.sentient_log.max_chars,
     )
     render_result = render_wallpaper(
@@ -160,11 +186,13 @@ def build_mock_output(
         width=render_width,
         height=render_height,
         visual_config=app_config.visual,
-        rolling_points=chart_points,
+        chart_points=chart_points,
         streak_days=score.streak_days,
-        expected_recent_minutes=score.expected_recent_minutes,
-        today_minutes=today_minutes,
+        streak_pending=score.streak_pending,
+        expected_recent_points=score.expected_recent_points,
+        today_points=today_points,
         gap_days=gap_days,
+        last_run_details=last_run_details,
         sentient_log=sentient_log,
         show_systemd_box=app_config.telemetry.show_systemd_box,
         show_vignette=app_config.telemetry.show_vignette,
@@ -173,6 +201,7 @@ def build_mock_output(
 
     start_day = end_day - timedelta(days=44)
     daily_minutes = daily_minutes_map(conn, start_day=start_day, end_day=end_day)
+    daily_points = daily_points_map(conn, start_day=start_day, end_day=end_day)
     source_counts = {
         row["source"]: int(row["count"])
         for row in conn.execute("SELECT source, COUNT(*) AS count FROM activities GROUP BY source").fetchall()
@@ -181,6 +210,20 @@ def build_mock_output(
         row["source"]: int(row["minutes"])
         for row in conn.execute("SELECT source, SUM(duration_minutes) AS minutes FROM activities GROUP BY source").fetchall()
     }
+    source_points = {
+        row["source"]: int(round(float(row["points"])))
+        for row in conn.execute("SELECT source, SUM(points) AS points FROM activities GROUP BY source").fetchall()
+    }
+    serialized_chart_points = [
+        {
+            "day": point.day,
+            "run_points": point.run_points,
+            "other_points": point.other_points,
+            "total_points": point.total_points,
+            "is_best": point.is_best,
+        }
+        for point in chart_points
+    ]
     summary = {
         "mock": True,
         "output_root": str(output_root),
@@ -190,25 +233,33 @@ def build_mock_output(
         "date": score.date,
         "score": score.score,
         "streak_days": score.streak_days,
+        "streak_pending": score.streak_pending,
         "total_minutes": score.total_minutes,
         "recent_minutes": score.recent_minutes,
         "baseline_daily_minutes": score.baseline_daily_minutes,
         "expected_recent_minutes": score.expected_recent_minutes,
+        "total_points": score.total_points,
+        "recent_points": score.recent_points,
+        "baseline_daily_points": score.baseline_daily_points,
+        "expected_recent_points": score.expected_recent_points,
         "today_minutes": today_minutes,
+        "today_points": today_points,
         "gap_days": gap_days,
-        "systemd_lines": systemd_status_lines(today_minutes, gap_days, alert_gap_days=app_config.telemetry.gap_alert_days),
+        "systemd_lines": systemd_status_lines(today_points, gap_days, alert_gap_days=app_config.telemetry.gap_alert_days),
         "sentient_log": sentient_log,
         "activity_count": len(entries),
         "source_counts": source_counts,
         "source_minutes": source_minutes,
+        "source_points": source_points,
         "daily_minutes": daily_minutes,
-        "rolling_points": chart_points,
+        "daily_points": daily_points,
+        "daily_chart_points": serialized_chart_points,
         "diagnostics": {
             "backend": render_result.diagnostics.backend,
             "bar_count": render_result.diagnostics.bar_count,
-            "latest_5_day_minutes": render_result.diagnostics.latest_5_day_minutes,
-            "max_5_day_minutes": render_result.diagnostics.max_5_day_minutes,
-            "bar_scale_minutes": render_result.diagnostics.bar_scale_minutes,
+            "latest_day_points": render_result.diagnostics.latest_day_points,
+            "max_day_points": render_result.diagnostics.max_day_points,
+            "bar_scale_points": render_result.diagnostics.bar_scale_points,
             "status": render_result.diagnostics.status,
             "vignette_mode": render_result.diagnostics.vignette_mode,
             "sentient_log_present": render_result.diagnostics.sentient_log_present,
@@ -242,7 +293,7 @@ def main() -> int:
     print(f"wallpaper: {summary['wallpaper']}")
     print(
         f"score={summary['score']} streak={summary['streak_days']} "
-        f"recent_minutes={summary['recent_minutes']} status={summary['diagnostics']['status']}"
+        f"recent_points={summary['recent_points']} status={summary['diagnostics']['status']}"
     )
     return 0
 

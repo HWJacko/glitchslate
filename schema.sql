@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS activities (
     local_date TEXT NOT NULL,
     activity_type TEXT,
     duration_minutes INTEGER NOT NULL,
+    points REAL NOT NULL DEFAULT 0,
+    point_components TEXT,
     intensity TEXT,
     notes TEXT,
     raw_payload TEXT,

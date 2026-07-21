@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from db import connect, get_sync_state, init_db
-from telegram_sync import get_workout_parser, parse_workout_with_openai, sync_telegram
+from telegram_sync import _request_get, get_workout_parser, parse_workout_with_openai, sync_telegram
 
 
 class FakeOpenAIResponses:
@@ -21,7 +21,8 @@ class FakeOpenAIResponses:
             {
                 "output_text": (
                     '{"is_workout":true,"activity_type":"strength",'
-                    '"duration_minutes":45,"intensity":"medium","notes":"Upper body"}'
+                    '"duration_minutes":45,"intensity":"medium","notes":"Upper body",'
+                    '"exercises":[]}'
                 )
             },
         )()
@@ -97,6 +98,17 @@ class TelegramSyncTests(unittest.TestCase):
                 "duration_minutes": 45,
                 "intensity": "medium",
                 "notes": "Upper body",
+                "exercises": [
+                    {
+                        "movement": "curl",
+                        "sets": 3,
+                        "reps_per_set": 10,
+                        "total_reps": 30,
+                        "weight_kg": 10,
+                        "bodyweight": False,
+                        "movement_multiplier": 1,
+                    }
+                ],
             }
 
         count = sync_telegram(
@@ -111,6 +123,7 @@ class TelegramSyncTests(unittest.TestCase):
         row = self.conn.execute("SELECT * FROM activities WHERE source = 'telegram'").fetchone()
         self.assertEqual(row["external_id"], "77")
         self.assertEqual(row["duration_minutes"], 45)
+        self.assertEqual(row["points"], 300)
 
 
     def test_dry_run_does_not_persist_offset_or_activity(self) -> None:
@@ -159,6 +172,16 @@ class TelegramSyncTests(unittest.TestCase):
             clear=False,
         ):
             self.assertIs(get_workout_parser(), parse_workout_with_openai)
+
+    def test_telegram_request_error_does_not_expose_bot_url(self) -> None:
+        import requests
+
+        tokenized_url = "https://api.telegram.org/botsecret-token/getUpdates"
+        with patch("requests.get", side_effect=requests.ConnectionError(tokenized_url)):
+            with self.assertRaises(RuntimeError) as raised:
+                _request_get(tokenized_url, {}, 1)
+        self.assertEqual(str(raised.exception), "Telegram API request failed")
+        self.assertIsNone(raised.exception.__cause__)
 
 
 if __name__ == "__main__":

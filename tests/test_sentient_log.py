@@ -11,17 +11,17 @@ class SentientLogTests(unittest.TestCase):
         self.assertLessEqual(len(sanitize_sentient_log("x" * 100, max_chars=20)), 20)
 
     def test_prompt_contains_metrics(self) -> None:
-        prompt = build_sentient_prompt(score=42, streak_days=3, today_minutes=0)
+        prompt = build_sentient_prompt(score=42, streak_days=3, today_points=0)
         self.assertIn("Current Score: 42/100", prompt)
         self.assertIn("Streak: 3 days", prompt)
-        self.assertIn("Today's workout: 0 minutes", prompt)
+        self.assertIn("Today's workout: 0 points", prompt)
 
     def test_extract_output_text_from_responses_payload(self) -> None:
         payload = {"output": [{"content": [{"text": "Systems nominal."}]}]}
         self.assertEqual(_extract_output_text(payload), "Systems nominal.")
 
     def test_fallback_is_single_line_and_bounded(self) -> None:
-        text = fallback_sentient_log(score=10, streak_days=0, today_minutes=0, max_chars=45)
+        text = fallback_sentient_log(score=10, streak_days=0, today_points=0, max_chars=45)
         self.assertNotIn("\n", text)
         self.assertLessEqual(len(text), 45)
 

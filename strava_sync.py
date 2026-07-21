@@ -61,18 +61,40 @@ def get_access_token(
 ) -> str:
     current_time = int((now or datetime.now(timezone.utc)).timestamp())
     persisted_token = get_sync_state(conn, "strava_access_token")
+    persisted_refresh_token = get_sync_state(conn, "strava_refresh_token")
+    configured_refresh_token = get_sync_state(conn, "strava_config_refresh_token")
     expires_at = int(get_sync_state(conn, "strava_token_expires_at") or "0")
+    env_token_changed = configured_refresh_token is not None and configured_refresh_token != env_refresh_token
+    legacy_env_token_changed = (
+        configured_refresh_token is None
+        and persisted_refresh_token is not None
+        and persisted_refresh_token != env_refresh_token
+    )
+    if env_token_changed or legacy_env_token_changed:
+        access_token = refresh_token(
+            conn,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token_value=env_refresh_token,
+            session=session,
+        )
+        set_sync_state(conn, "strava_config_refresh_token", env_refresh_token)
+        return access_token
+    if configured_refresh_token is None:
+        set_sync_state(conn, "strava_config_refresh_token", env_refresh_token)
     if persisted_token and expires_at > current_time + 60:
         return persisted_token
 
-    refresh_token_value = get_sync_state(conn, "strava_refresh_token") or env_refresh_token
-    return refresh_token(
+    refresh_token_value = persisted_refresh_token or env_refresh_token
+    access_token = refresh_token(
         conn,
         client_id=client_id,
         client_secret=client_secret,
         refresh_token_value=refresh_token_value,
         session=session,
     )
+    set_sync_state(conn, "strava_config_refresh_token", env_refresh_token)
+    return access_token
 
 
 def fetch_activities(
@@ -90,6 +112,33 @@ def fetch_activities(
     )
     response.raise_for_status()
     return list(response.json())
+
+
+def _is_unauthorized_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 401
+
+
+def _missing_activity_read_message(exc: Exception) -> str | None:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    if not isinstance(errors, list):
+        return None
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        if error.get("field") == "activity:read_permission" and error.get("code") == "missing":
+            return (
+                "Strava access token is missing activity read permission. "
+                "Re-authorize the app with scope activity:read, or activity:read_all for Only You activities."
+            )
+    return None
 
 
 def _parse_strava_timestamp(value: str) -> datetime:
@@ -124,7 +173,26 @@ def sync_strava(
         session=session,
         now=current,
     )
-    activities = fetch_activities(token, after=after.astimezone(timezone.utc), session=session)
+    after_utc = after.astimezone(timezone.utc)
+    try:
+        activities = fetch_activities(token, after=after_utc, session=session)
+    except Exception as exc:
+        if not _is_unauthorized_error(exc):
+            raise
+        token = refresh_token(
+            conn,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token_value=get_sync_state(conn, "strava_refresh_token") or refresh_token_value,
+            session=session,
+        )
+        try:
+            activities = fetch_activities(token, after=after_utc, session=session)
+        except Exception as retry_exc:
+            permission_message = _missing_activity_read_message(retry_exc)
+            if permission_message:
+                raise RuntimeError(permission_message) from retry_exc
+            raise
     inserted = 0
 
     for item in activities:

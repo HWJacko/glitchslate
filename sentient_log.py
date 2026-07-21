@@ -14,10 +14,10 @@ def sanitize_sentient_log(text: str, *, max_chars: int = 90) -> str:
     return cleaned[: max(0, max_chars - 3)].rstrip() + "..."
 
 
-def fallback_sentient_log(*, score: int, streak_days: int, today_minutes: int, max_chars: int = 90) -> str:
-    if today_minutes <= 0 and score < 50:
+def fallback_sentient_log(*, score: int, streak_days: int, today_points: int, max_chars: int = 90) -> str:
+    if today_points <= 0 and score < 50:
         text = "Metabolic output below mission tolerance; efficiency loss is now measurable."
-    elif today_minutes <= 0:
+    elif today_points <= 0:
         text = "No kinetic input logged; baseline decay monitor remains active."
     elif score >= 80:
         text = "Crew output nominal; physical systems remain within operational baseline."
@@ -26,12 +26,12 @@ def fallback_sentient_log(*, score: int, streak_days: int, today_minutes: int, m
     return sanitize_sentient_log(text, max_chars=max_chars)
 
 
-def build_sentient_prompt(*, score: int, streak_days: int, today_minutes: int, max_chars: int = 90) -> str:
+def build_sentient_prompt(*, score: int, streak_days: int, today_points: int, max_chars: int = 90) -> str:
     return f"""You are the onboard mainframe computer of a deep-space exploration vessel.
 Analyze the current crew member's physical output:
 - Current Score: {score}/100
 - Streak: {streak_days} days
-- Today's workout: {today_minutes} minutes
+- Today's workout: {today_points} points
 
 Generate a single-sentence status log for the system dashboard.
 Keep it under {max_chars} characters. Be clinical, technical, and dryly realistic.
@@ -91,14 +91,14 @@ def generate_sentient_log(
     *,
     score: int,
     streak_days: int,
-    today_minutes: int,
+    today_points: int,
     model: str = "gpt-4o-mini",
     max_chars: int = 90,
 ) -> str:
     prompt = build_sentient_prompt(
         score=score,
         streak_days=streak_days,
-        today_minutes=today_minutes,
+        today_points=today_points,
         max_chars=max_chars,
     )
     try:

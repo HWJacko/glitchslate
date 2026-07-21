@@ -26,8 +26,33 @@ WORKOUT_SCHEMA: dict[str, Any] = {
         "duration_minutes": {"type": "integer"},
         "intensity": {"type": "string"},
         "notes": {"type": "string"},
+        "exercises": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "movement": {"type": "string"},
+                    "sets": {"type": "integer"},
+                    "reps_per_set": {"type": "integer"},
+                    "total_reps": {"type": "integer"},
+                    "weight_kg": {"type": "number"},
+                    "bodyweight": {"type": "boolean"},
+                    "movement_multiplier": {"type": "number"},
+                },
+                "required": [
+                    "movement",
+                    "sets",
+                    "reps_per_set",
+                    "total_reps",
+                    "weight_kg",
+                    "bodyweight",
+                    "movement_multiplier",
+                ],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["is_workout", "activity_type", "duration_minutes", "intensity", "notes"],
+    "required": ["is_workout", "activity_type", "duration_minutes", "intensity", "notes", "exercises"],
     "additionalProperties": False,
 }
 
@@ -35,8 +60,9 @@ WORKOUT_SCHEMA: dict[str, Any] = {
 def _workout_prompt(text: str) -> str:
     return (
         "Extract workout information from this message. Return only JSON with keys "
-        "is_workout, activity_type, duration_minutes, intensity, notes. "
-        "Use is_workout=false when the text is not a workout check-in. If the message describes sets, reps, weights, or bodyweight exercises but not duration, infer a conservative duration_minutes estimate from the described work.\n\n"
+        "is_workout, activity_type, duration_minutes, intensity, notes, exercises. "
+        "Use is_workout=false when the text is not a workout check-in. If the message describes sets, reps, weights, or bodyweight exercises but not duration, infer a conservative duration_minutes estimate from the described work. "
+        "For exercises, return one object per movement with total_reps, weight_kg, bodyweight, and movement_multiplier. Use weight_kg=0 when no external load is specified, bodyweight=true for bodyweight movements, movement_multiplier=1 unless the movement is clearly partial or unusually demanding, and exercises=[] when reps/loads are unclear.\n\n"
         f"Message: {text}"
     )
 
@@ -46,8 +72,11 @@ def _request_get(url: str, params: dict[str, Any], timeout: int = 30) -> dict[st
         import requests
     except ImportError as exc:
         raise RuntimeError("requests is required for Telegram sync") from exc
-    response = requests.get(url, params=params, timeout=timeout)
-    response.raise_for_status()
+    try:
+        response = requests.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException:
+        raise RuntimeError("Telegram API request failed") from None
     data = response.json()
     if not data.get("ok"):
         raise RuntimeError("Telegram API returned ok=false")
@@ -212,29 +241,21 @@ def _message_datetime(message: dict[str, Any]) -> datetime:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
 
-def sync_telegram(
+def sync_telegram_updates(
     conn,
+    updates: list[dict[str, Any]],
     *,
-    token: str,
     allowed_user_id: int,
     parser: Parser | None = None,
-    request_get: Callable[[str, dict[str, Any], int], dict[str, Any]] = _request_get,
     dry_run: bool = False,
     timezone_name: str | None = None,
+    allowed_local_dates: set[str] | None = None,
 ) -> int:
-    last_update = get_sync_state(conn, "telegram_last_update_id")
-    offset = int(last_update) + 1 if last_update is not None else None
-    updates = fetch_updates(token, offset=offset, request_get=request_get)
-    highest_update_id: int | None = None
     inserted = 0
     tz = get_timezone(timezone_name)
-    workout_parser = parser or get_workout_parser()
+    workout_parser = parser
 
     for update in updates:
-        update_id = update.get("update_id")
-        if update_id is not None:
-            highest_update_id = max(highest_update_id or int(update_id), int(update_id))
-
         message = _message_from_update(update)
         if not message:
             continue
@@ -245,10 +266,18 @@ def sync_telegram(
         if not text:
             continue
 
+        message_datetime = _message_datetime(message)
+        if allowed_local_dates is not None:
+            local_date = message_datetime.astimezone(tz).date().isoformat()
+            if local_date not in allowed_local_dates:
+                continue
+
         if dry_run:
             print(f"telegram:{message.get('message_id')}: {text}")
             continue
 
+        if workout_parser is None:
+            workout_parser = get_workout_parser()
         try:
             parsed = workout_parser(text)
         except Exception as exc:
@@ -264,7 +293,7 @@ def sync_telegram(
         activity = Activity(
             source="telegram",
             external_id=str(message["message_id"]),
-            timestamp=_message_datetime(message),
+            timestamp=message_datetime,
             activity_type=str(parsed.get("activity_type") or "workout"),
             duration_minutes=duration,
             intensity=str(parsed.get("intensity") or "") or None,
@@ -273,6 +302,38 @@ def sync_telegram(
         )
         upsert_activity(conn, activity, tz=tz)
         inserted += 1
+
+    return inserted
+
+
+def sync_telegram(
+    conn,
+    *,
+    token: str,
+    allowed_user_id: int,
+    parser: Parser | None = None,
+    request_get: Callable[[str, dict[str, Any], int], dict[str, Any]] = _request_get,
+    dry_run: bool = False,
+    timezone_name: str | None = None,
+) -> int:
+    last_update = get_sync_state(conn, "telegram_last_update_id")
+    offset = int(last_update) + 1 if last_update is not None else None
+    updates = fetch_updates(token, offset=offset, request_get=request_get)
+    highest_update_id: int | None = None
+
+    for update in updates:
+        update_id = update.get("update_id")
+        if update_id is not None:
+            highest_update_id = max(highest_update_id or int(update_id), int(update_id))
+
+    inserted = sync_telegram_updates(
+        conn,
+        updates,
+        allowed_user_id=allowed_user_id,
+        parser=parser,
+        dry_run=dry_run,
+        timezone_name=timezone_name,
+    )
 
     if highest_update_id is not None and not dry_run:
         set_sync_state(conn, "telegram_last_update_id", highest_update_id)

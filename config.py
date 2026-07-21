@@ -39,6 +39,7 @@ class ScoringConfig:
     recent_window_days: int = 5
     baseline_window_days: int = 30
     min_expected_5_day_minutes: int = 60
+    min_expected_5_day_points: float = 1500.0
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,19 @@ class TelemetryConfig:
 
 
 @dataclass(frozen=True)
+class TelegramArchiveConfig:
+    enabled: bool = False
+    blank_lookback_days: int = 28
+    remote_dir: str = "glitchslate-telegram-inbox"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     visual: VisualConfig = VisualConfig()
     scoring: ScoringConfig = ScoringConfig()
     sentient_log: SentientLogConfig = SentientLogConfig()
     telemetry: TelemetryConfig = TelemetryConfig()
+    telegram_archive: TelegramArchiveConfig = TelegramArchiveConfig()
 
 
 def _load_one_env(env_path: Path) -> None:
@@ -138,6 +147,7 @@ def default_config_dict() -> dict[str, Any]:
             "recent_window_days": 5,
             "baseline_window_days": 30,
             "min_expected_5_day_minutes": 60,
+            "min_expected_5_day_points": 1500.0,
         },
         "sentient_log": {
             "enabled": True,
@@ -148,6 +158,11 @@ def default_config_dict() -> dict[str, Any]:
             "show_systemd_box": True,
             "gap_alert_days": 3,
             "show_vignette": True,
+        },
+        "telegram_archive": {
+            "enabled": False,
+            "blank_lookback_days": 28,
+            "remote_dir": "glitchslate-telegram-inbox",
         },
     }
 
@@ -168,6 +183,7 @@ def app_config_from_dict(raw: dict[str, Any]) -> AppConfig:
         scoring=ScoringConfig(**data["scoring"]),
         sentient_log=SentientLogConfig(**data["sentient_log"]),
         telemetry=TelemetryConfig(**data["telemetry"]),
+        telegram_archive=TelegramArchiveConfig(**data["telegram_archive"]),
     )
     validate_config(config)
     return config
@@ -218,3 +234,9 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("sentient_log.max_chars must be positive")
     if config.telemetry.gap_alert_days <= 0:
         raise ValueError("telemetry.gap_alert_days must be positive")
+    if config.telegram_archive.blank_lookback_days <= 0:
+        raise ValueError("telegram_archive.blank_lookback_days must be positive")
+    if config.telegram_archive.blank_lookback_days > 28:
+        raise ValueError("telegram_archive.blank_lookback_days must not exceed 28")
+    if not config.telegram_archive.remote_dir:
+        raise ValueError("telegram_archive.remote_dir must not be empty")

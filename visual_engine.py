@@ -7,6 +7,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from config import VisualConfig
 
@@ -19,11 +20,11 @@ HEIGHT = 2160
 class RenderDiagnostics:
     backend: str
     bar_count: int
-    latest_5_day_minutes: int
-    max_5_day_minutes: int
-    bar_scale_minutes: float
+    latest_day_points: int
+    max_day_points: int
+    bar_scale_points: float
     status: str
-    today_minutes: int
+    today_points: int
     gap_days: int
     vignette_mode: str
     sentient_log_present: bool
@@ -60,8 +61,8 @@ def vignette_mode(score: int) -> str:
     return "neutral"
 
 
-def systemd_status_lines(today_minutes: int, gap_days: int, *, alert_gap_days: int = 3) -> list[str]:
-    if today_minutes > 0:
+def systemd_status_lines(today_points: int, gap_days: int, *, alert_gap_days: int = 3) -> list[str]:
+    if today_points > 0:
         return [
             "● kinetic_drive.service - Active (Running) since 4h ago",
             "● cardio_subsystem.status - NOMINAL (98% efficiency)",
@@ -100,6 +101,12 @@ def _format_minutes(minutes: int) -> str:
     if mins == 0:
         return f"{hours}h"
     return f"{hours}h{mins:02d}"
+
+
+def _format_points(points: int) -> str:
+    if points >= 1000:
+        return f"{points / 1000:.1f}kpt"
+    return f"{points}pt"
 
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
@@ -161,6 +168,13 @@ def _draw_vertical_gradient(draw, xy, radius: int, start_color, end_color) -> No
     _rounded_rectangle(draw, xy, radius=radius, fill=None, outline=start_color, width=max(1, int((x1 - x0) * 0.05)))
 
 
+def _draw_segment(draw, xy, fill, *, radius: int = 0) -> None:
+    if radius > 0:
+        _rounded_rectangle(draw, xy, radius=radius, fill=fill)
+    else:
+        draw.rectangle(xy, fill=fill)
+
+
 def _draw_centered_text(draw, y: int, text: str, *, width: int, fill, font) -> None:
     bbox = draw.textbbox((0, 0), text, font=font)
     draw.text((int((width - (bbox[2] - bbox[0])) / 2), y), text, fill=fill, font=font)
@@ -205,6 +219,51 @@ def _label_indices(values: list[int]) -> set[int]:
     return indices
 
 
+def _field(point: Any, name: str, default: Any = 0) -> Any:
+    if isinstance(point, dict):
+        return point.get(name, default)
+    return getattr(point, name, default)
+
+
+def _coerce_chart_points(points: list[Any], day: str) -> list[dict[str, Any]]:
+    if not points:
+        return [{"day": day, "run_points": 0, "other_points": 0, "total_points": 0, "is_best": False} for _ in range(30)]
+    coerced: list[dict[str, Any]] = []
+    for point in points:
+        if isinstance(point, tuple) and len(point) == 2:
+            point_day, total = point
+            run_points = 0
+            other_points = int(total)
+            is_best = False
+        else:
+            point_day = str(_field(point, "day", day))
+            run_points = int(_field(point, "run_points", 0))
+            other_points = int(_field(point, "other_points", 0))
+            total = int(_field(point, "total_points", run_points + other_points))
+            is_best = bool(_field(point, "is_best", False))
+        coerced.append(
+            {
+                "day": str(point_day),
+                "run_points": run_points,
+                "other_points": other_points,
+                "total_points": int(total),
+                "is_best": is_best,
+            }
+        )
+    return coerced
+
+
+def _format_pace(minutes_per_km: float) -> str:
+    if minutes_per_km <= 0:
+        return "--"
+    minutes = int(minutes_per_km)
+    seconds = int(round((minutes_per_km - minutes) * 60))
+    if seconds == 60:
+        minutes += 1
+        seconds = 0
+    return f"{minutes}:{seconds:02d}/km"
+
+
 def render_wallpaper(
     *,
     score: int,
@@ -215,11 +274,13 @@ def render_wallpaper(
     height: int = HEIGHT,
     seed: int | None = None,
     visual_config: VisualConfig | None = None,
-    rolling_points: list[tuple[str, int]] | None = None,
+    chart_points: list[Any] | None = None,
     streak_days: int = 0,
-    expected_recent_minutes: float = 60.0,
-    today_minutes: int = 0,
+    streak_pending: bool = False,
+    expected_recent_points: float = 1500.0,
+    today_points: int = 0,
     gap_days: int = 0,
+    last_run_details: Any | None = None,
     sentient_log: str | None = None,
     show_systemd_box: bool = True,
     show_vignette: bool = True,
@@ -232,11 +293,12 @@ def render_wallpaper(
     timestamped = output_path / f"wallpaper_{stamp}.png"
     current = output_path / "wallpaper_current.png"
 
-    points = rolling_points or [(day, 0) for _ in range(30)]
-    values = [minutes for _, minutes in points]
-    latest = values[-1] if values else 0
-    max_minutes = max(values) if values else 0
-    bar_scale = max(float(expected_recent_minutes), float(max_minutes), 1.0)
+    points = _coerce_chart_points(chart_points or [], day)
+    values = [int(point["total_points"]) for point in points]
+    latest_populated_index = next((index for index in range(len(values) - 1, -1, -1) if values[index] > 0), None)
+    latest = values[latest_populated_index] if latest_populated_index is not None else 0
+    max_points = max(values) if values else 0
+    bar_scale = max(float(expected_recent_points), float(max_points), 1.0)
     status = system_status(score)
     vignette = vignette_mode(score) if show_vignette else "off"
 
@@ -252,8 +314,9 @@ def render_wallpaper(
         text = _hex_to_rgb(config.text_color)
         muted = _hex_to_rgb(config.muted_text_color)
         alert = _hex_to_rgb(config.alert_color)
-        gradient_start = _hex_to_rgb(config.active_gradient[0])
-        gradient_end = _hex_to_rgb(config.active_gradient[1])
+        run_color = _hex_to_rgb(config.active_gradient[0])
+        other_color = _hex_to_rgb(config.active_gradient[1])
+        best_color = (245, 208, 66)
 
         image = Image.new("RGBA", (width, height), (*bg, 255))
         draw = ImageDraw.Draw(image)
@@ -278,22 +341,35 @@ def render_wallpaper(
         slot = chart_width / count
         bar_width = max(4, int(slot * 0.62))
         radius = max(3, bar_width // 2)
-        label_every = _label_indices(values)
+        label_every = {latest_populated_index} if latest_populated_index is not None else set()
 
-        for index, (point_day, minutes) in enumerate(points):
+        for index, point in enumerate(points):
+            point_day = str(point["day"])
+            run_points = int(point["run_points"])
+            other_points = int(point["other_points"])
+            point_value = int(point["total_points"])
             center_x = chart_left + (index + 0.5) * slot
             x0 = int(center_x - bar_width / 2)
             x1 = int(center_x + bar_width / 2)
             empty_y0 = chart_top
             empty_y1 = chart_bottom
             _rounded_rectangle(draw, (x0, empty_y0, x1, empty_y1), radius=radius, fill=empty)
-            if minutes > 0:
-                ratio = min(1.0, minutes / bar_scale)
+            if point_value > 0:
+                ratio = min(1.0, point_value / bar_scale)
                 fill_height = max(24, int(chart_height * ratio))
                 y0 = chart_bottom - fill_height
-                _draw_vertical_gradient(draw, (x0, y0, x1, chart_bottom), radius=radius, start_color=gradient_start, end_color=gradient_end)
-            if index in label_every and minutes > 0:
-                label = _format_minutes(minutes)
+                run_height = int(fill_height * (run_points / point_value)) if point_value else 0
+                other_height = fill_height - run_height
+                if other_height > 0:
+                    _draw_segment(draw, (x0, chart_bottom - other_height, x1, chart_bottom), other_color, radius=radius if run_height <= 0 else 0)
+                if run_height > 0:
+                    run_y0 = y0
+                    run_y1 = chart_bottom - other_height
+                    _draw_segment(draw, (x0, run_y0, x1, run_y1), run_color, radius=radius if other_height <= 0 else 0)
+                if bool(point["is_best"]):
+                    _rounded_rectangle(draw, (x0 - 2, y0 - 2, x1 + 2, chart_bottom + 2), radius=radius + 2, fill=None, outline=best_color, width=max(1, width // 960))
+            if index in label_every and point_value > 0:
+                label = _format_points(point_value)
                 bbox = draw.textbbox((0, 0), label, font=label_font)
                 lx = int(center_x - (bbox[2] - bbox[0]) / 2)
                 ly = chart_top - int(height * 0.035)
@@ -310,19 +386,33 @@ def render_wallpaper(
             "// GLITCHSLATE TELEMETRY CORE v1.0 //",
             "-------------------------------------------",
             f"CURRENT SCORE : [ {score:3d} / 100  ]",
-            f"ACTIVE STREAK : [ {streak_days:3d} DAYS   ]",
-            f"5-DAY VOLUME  : [ {_format_minutes(latest):>8} ]",
+            f"ACTIVE STREAK : [ {streak_days:3d} DAYS{'*' if streak_pending else ' '} ]",
+            f"TODAY VOLUME  : [ {_format_points(today_points):>8} ]",
+            f"LATEST DAY    : [ {_format_points(latest):>8} ]",
             f"SYSTEM STATUS : [ {status:<9} ]",
         ]
         for offset, line in enumerate(lines):
             fill = status_color if "SYSTEM STATUS" in line else text if offset in {0, 2, 3, 4} else muted
             draw.text((header_x, header_y + offset * int(height * 0.04)), line, fill=fill, font=title_font if offset == 0 else meta_font)
 
-        footer = f"ROLLING 5-DAY TOTALS // TARGET {int(round(expected_recent_minutes))}m // WINDOW END {day}"
+        footer = f"DAILY TOTALS // TARGET {int(round(expected_recent_points))}pt/DAY // RUN + OTHER // WINDOW END {day}"
         draw.text((chart_left, int(height * 0.80)), footer, fill=muted, font=small_font)
 
+        if last_run_details is not None:
+            detail_x = int(width * 0.62)
+            detail_y = int(height * 0.845)
+            detail_lines = [
+                "LAST RUN",
+                f"{_field(last_run_details, 'day', '--')}  {_field(last_run_details, 'distance_km', 0):.2f}km",
+                f"{_format_minutes(int(_field(last_run_details, 'duration_minutes', 0)))}  {_format_pace(float(_field(last_run_details, 'pace_min_per_km', 0)))}",
+                f"{_format_points(int(_field(last_run_details, 'points', 0)))}  +{_field(last_run_details, 'elevation_m', 0):.0f}m elev",
+            ]
+            for offset, line in enumerate(detail_lines):
+                fill = text if offset == 0 else muted
+                draw.text((detail_x, detail_y + offset * max(11, int(height * 0.017))), line, fill=fill, font=small_font)
+
         if show_systemd_box:
-            systemd_lines = systemd_status_lines(today_minutes, gap_days, alert_gap_days=systemd_alert_gap_days)
+            systemd_lines = systemd_status_lines(today_points, gap_days, alert_gap_days=systemd_alert_gap_days)
             log_x = chart_left
             log_y = int(height * 0.845)
             line_step = max(11, int(height * 0.017))
@@ -355,11 +445,11 @@ def render_wallpaper(
         diagnostics=RenderDiagnostics(
             backend=backend,
             bar_count=len(points),
-            latest_5_day_minutes=latest,
-            max_5_day_minutes=max_minutes,
-            bar_scale_minutes=bar_scale,
+            latest_day_points=latest,
+            max_day_points=max_points,
+            bar_scale_points=bar_scale,
             status=status,
-            today_minutes=today_minutes,
+            today_points=today_points,
             gap_days=gap_days,
             vignette_mode=vignette,
             sentient_log_present=bool(sentient_log),
@@ -387,9 +477,9 @@ def main() -> int:
         "diagnostics="
         f"backend={result.diagnostics.backend} "
         f"bar_count={result.diagnostics.bar_count} "
-        f"latest_5_day_minutes={result.diagnostics.latest_5_day_minutes} "
-        f"max_5_day_minutes={result.diagnostics.max_5_day_minutes} "
-        f"bar_scale_minutes={result.diagnostics.bar_scale_minutes:.2f} "
+        f"latest_day_points={result.diagnostics.latest_day_points} "
+        f"max_day_points={result.diagnostics.max_day_points} "
+        f"bar_scale_points={result.diagnostics.bar_scale_points:.2f} "
         f"status={result.diagnostics.status} "
         f"vignette={result.diagnostics.vignette_mode}"
     )

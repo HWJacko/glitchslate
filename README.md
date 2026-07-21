@@ -19,7 +19,7 @@ The upstream signal was not simply "fitness app". The pipeline surfaced a narrow
 Technically, that trend created demand for this specific shape of project because the useful primitive is not a full product backend. It is a small bridge between:
 
 - conversational capture, where Telegram is faster than a form;
-- LLM normalization, where messy workout text becomes structured minutes;
+- LLM normalization, where messy workout text becomes structured workout points;
 - rolling local state, where SQLite is enough;
 - ambient rendering, where the desktop wallpaper becomes the feedback surface;
 - scheduled local execution, where `launchd` is simpler than a hosted worker.
@@ -29,11 +29,12 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 ## Features
 
 - Telegram workout ingestion using bot polling.
+- Optional Hetzner Telegram archive fallback for laptop sleep/backlog gaps.
 - LLM workout parsing via OpenAI by default, with Gemini support as an optional parser provider.
 - Optional Strava run ingestion.
 - Local SQLite persistence with idempotent activity inserts.
-- Rolling consistency score based on the last 5 local calendar days against a 30-day baseline.
-- Procedural wallpaper rendering with a 30-bar rolling 5-day activity chart.
+- Daily consistency score based on today's workout points against a 30-day baseline.
+- Procedural wallpaper rendering with a 30-bar daily activity chart.
 - System status labels: `STABLE`, `DRIFTING`, `AT RISK`, `CRITICAL`.
 - Optional OpenAI-generated sentient status log rendered on the wallpaper.
 - Pseudo-systemd telemetry box based on today's workout volume and inactivity gap.
@@ -49,7 +50,7 @@ The main pipeline is `main.py`:
 2. Poll Telegram for new messages.
 3. Parse workout-like messages into structured activity records.
 4. Optionally sync Strava runs.
-5. Calculate the rolling score.
+5. Calculate today's score against the daily baseline target.
 6. Render a wallpaper into `assets/`.
 7. Apply it as the macOS desktop wallpaper unless `--dry-run` or `--no-apply` is used.
 
@@ -60,13 +61,17 @@ Generated wallpapers and the local database are ignored by Git.
 Glitchslate scores consistency, not absolute athletic performance.
 
 ```text
-recent_minutes = total workout minutes over the last 5 local calendar days
-baseline_daily_minutes = average daily workout minutes over the last 30 local calendar days
-expected_recent_minutes = max(min_expected_5_day_minutes, baseline_daily_minutes * 5)
-score = clamp(round((recent_minutes / expected_recent_minutes) * 100), 0, 100)
+strength_points = reps * weight_kg * movement_multiplier
+running_points = moving_minutes * running_value
+today_points = total workout points for the current local calendar day
+baseline_daily_points = average daily workout points over the last 30 local calendar days
+expected_daily_points = max(min_expected_5_day_points / 5, baseline_daily_points)
+score = clamp(round((today_points / expected_daily_points) * 100), 0, 100)
 ```
 
-The chart shows 30 bars. Each bar is a trailing 5-day total ending on that date, so sparse workouts remain visible as they move through the rolling window.
+For Strava runs, `running_value` is derived from Strava fields already stored in `raw_payload`: `moving_time`, `distance`, `average_speed`, `total_elevation_gain`, and `sport_type`. Pace and elevation adjust a base running value, while minutes remain stored as context.
+
+The chart shows 30 daily bars. Each bar is an actual local calendar day, stacked by run points and other workout points. The latest populated day is labeled, and the best day in the visible window is highlighted.
 
 ## Requirements
 
@@ -96,6 +101,10 @@ Fill in the values you need:
 ```text
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_USER_ID=
+TELEGRAM_DIRECT_SYNC=true
+TELEGRAM_ARCHIVE_ENABLED=false
+HETZNER_TELEGRAM_SSH=
+HETZNER_TELEGRAM_REMOTE_DIR=glitchslate-telegram-inbox
 WORKOUT_PARSER_PROVIDER=openai
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
@@ -167,7 +176,7 @@ The output root contains:
 ```text
 mock_glitchslate.db      SQLite database with Telegram-like and Strava-like mock activities
 assets/                  Rendered mock wallpapers
-summary.json             Score, source totals, rolling points, diagnostics, and rendered paths
+summary.json             Score, source totals, daily chart points, diagnostics, and rendered paths
 ```
 
 The mock output is ignored by Git. It is intended for screenshots, renderer checks, documentation, and testing the full visual pipeline with realistic data while keeping real personal activity data local and private.
@@ -201,6 +210,49 @@ Example messages:
 45 min easy run
 ```
 
+## Hetzner Telegram Archive
+
+Telegram bot updates expire if nothing receives them. To preserve backlog while the laptop sleeps, run the lightweight collector on Hetzner. It stores authorized text updates as dated JSONL files and removes files older than 28 days.
+
+On Hetzner, copy this repo or at least the Python files, create `.env`, and run:
+
+```bash
+python3 scripts/telegram_archive_collector.py --inbox-dir glitchslate-telegram-inbox --retention-days 28
+```
+
+For systemd, use a small service like:
+
+```ini
+[Unit]
+Description=Glitchslate Telegram archive collector
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/glitchslate/glitchslate
+ExecStart=/usr/bin/python3 scripts/telegram_archive_collector.py --inbox-dir /home/glitchslate/glitchslate-telegram-inbox --retention-days 28
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+On the laptop, enable the fallback in `config.yaml` or `.env`:
+
+```text
+TELEGRAM_ARCHIVE_ENABLED=true
+HETZNER_TELEGRAM_SSH=glitchslate@your-hetzner-host
+HETZNER_TELEGRAM_REMOTE_DIR=/home/glitchslate/glitchslate-telegram-inbox
+```
+
+The laptop only SSH-fetches archive files for preceding days that have zero local Telegram activities. `telegram_archive.blank_lookback_days` defaults to 28 and is capped at the collector retention window.
+
+Avoid running two competing Telegram pollers. Once the Hetzner collector is active, set this on the laptop:
+
+```text
+TELEGRAM_DIRECT_SYNC=false
+```
+
 ## OpenAI and Gemini Parsing
 
 OpenAI is the default parser provider:
@@ -218,7 +270,7 @@ WORKOUT_PARSER_PROVIDER=gemini
 GEMINI_API_KEY=...
 ```
 
-The sentient status log currently uses OpenAI. It is skipped during `--dry-run`, generated during normal and `--no-apply` runs, and cached in SQLite by date, score, streak, and today's minutes.
+The sentient status log currently uses OpenAI. It is skipped during `--dry-run`, generated during normal and `--no-apply` runs, and cached in SQLite by date, score, streak, and today's points.
 
 ## Strava Setup
 
@@ -232,7 +284,21 @@ STRAVA_CLIENT_SECRET=
 STRAVA_REFRESH_TOKEN=
 ```
 
-Only Strava activities with type `Run` are imported. Tokens refreshed from Strava are persisted in SQLite sync state.
+Authorize the app with `activity:read` so `/athlete/activities` can be read. Use `activity:read_all` instead if you want activities whose visibility is set to Only You. Only Strava activities with type `Run` are imported. Tokens refreshed from Strava are persisted in SQLite sync state.
+
+The token shown on the Strava API settings page is usually only scoped to `read`. To create a refresh token with activity scope:
+
+```bash
+python3 scripts/strava_oauth.py authorize-url --scope activity:read
+```
+
+Open the printed URL, authorize the app, then copy the `code` query parameter from the redirected URL and exchange it:
+
+```bash
+python3 scripts/strava_oauth.py exchange-code YOUR_AUTHORIZATION_CODE --update-env
+```
+
+Use `--scope activity:read_all` instead if the app should import activities whose visibility is Only You.
 
 ## Hourly Local Sync With launchd
 
@@ -322,7 +388,7 @@ Run the full test suite:
 python3 -m unittest
 ```
 
-The tests cover config validation, database idempotency, rolling score behavior, Telegram parsing/sync logic, Strava sync logic, renderer smoke output, status bands, vignette selection, sentient-log fallback, and main pipeline dry-run behavior.
+The tests cover config validation, database idempotency, daily score behavior, Telegram parsing/sync logic, Strava sync logic, renderer smoke output, status bands, vignette selection, sentient-log fallback, and main pipeline dry-run behavior.
 
 ## Troubleshooting
 
