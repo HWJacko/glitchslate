@@ -54,6 +54,8 @@ class TelegramArchiveTests(unittest.TestCase):
 
         def runner(args, **kwargs):
             self.assertEqual(args[0], "ssh")
+            self.assertEqual(len(args), 3)
+            self.assertIn("sh -lc", args[-1])
             self.assertIn("2026-07-18", args[-1])
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(update) + "\n")
 

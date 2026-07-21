@@ -78,9 +78,10 @@ def fetch_remote_archive_days(
         'if [ -f "$file" ]; then cat "$file"; printf "\\n"; fi; '
         "done"
     )
+    remote_command = f"sh -lc {shlex.quote(remote_script)}"
     try:
         result = runner(
-            ["ssh", ssh_target, "sh", "-lc", remote_script],
+            ["ssh", ssh_target, remote_command],
             capture_output=True,
             text=True,
             timeout=timeout,
