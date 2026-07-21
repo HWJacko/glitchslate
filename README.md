@@ -245,7 +245,7 @@ HETZNER_TELEGRAM_SSH=glitchslate@your-hetzner-host
 HETZNER_TELEGRAM_REMOTE_DIR=/home/glitchslate/glitchslate-telegram-inbox
 ```
 
-The laptop only SSH-fetches archive files for preceding days that have zero local Telegram activities. `telegram_archive.blank_lookback_days` defaults to 28 and is capped at the collector retention window.
+The laptop SSH-fetches recent archive files, including today when direct Telegram sync is disabled, and relies on Telegram `message_id` idempotency to avoid duplicate inserts. `telegram_archive.blank_lookback_days` defaults to 28 and is capped at the collector retention window.
 
 Avoid running two competing Telegram pollers. Once the Hetzner collector is active, set this on the laptop:
 

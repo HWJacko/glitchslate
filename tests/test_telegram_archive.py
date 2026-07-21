@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from db import Activity, connect, init_db, upsert_activity
 from scripts.telegram_archive_collector import cleanup_old_files
-from telegram_archive import fetch_remote_archive_days, sync_telegram_archive_for_blank_days, telegram_blank_days
+from telegram_archive import fetch_remote_archive_days, sync_telegram_archive, telegram_archive_days, telegram_blank_days
 
 
 class TelegramArchiveTests(unittest.TestCase):
@@ -49,6 +49,22 @@ class TelegramArchiveTests(unittest.TestCase):
 
         self.assertEqual(days, ["2026-07-19", "2026-07-20"])
 
+    def test_archive_days_includes_every_recent_day_for_idempotent_resync(self) -> None:
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="telegram",
+                external_id="existing",
+                timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=timezone.utc),
+                activity_type="workout",
+                duration_minutes=10,
+            ),
+        )
+
+        days = telegram_archive_days(today=date(2026, 7, 20), lookback_days=2)
+
+        self.assertEqual(days, ["2026-07-18", "2026-07-19", "2026-07-20"])
+
     def test_fetch_remote_archive_days_reads_only_requested_day_files(self) -> None:
         update = {"update_id": 12, "message": {"message_id": 7, "from": {"id": 123}, "text": "20 pressups"}}
 
@@ -68,7 +84,7 @@ class TelegramArchiveTests(unittest.TestCase):
 
         self.assertEqual(updates, [update])
 
-    def test_archive_sync_processes_remote_updates_for_blank_days(self) -> None:
+    def test_archive_sync_processes_remote_updates_for_recent_days(self) -> None:
         update = {
             "update_id": 12,
             "message": {
@@ -103,7 +119,7 @@ class TelegramArchiveTests(unittest.TestCase):
                 ],
             }
 
-        result = sync_telegram_archive_for_blank_days(
+        result = sync_telegram_archive(
             self.conn,
             allowed_user_id=123,
             ssh_target="glitchslate@example",
@@ -122,7 +138,7 @@ class TelegramArchiveTests(unittest.TestCase):
         self.assertEqual(row["local_date"], "2026-07-18")
         self.assertEqual(row["points"], 60)
 
-    def test_archive_sync_does_not_ssh_when_no_blank_days(self) -> None:
+    def test_archive_sync_checks_existing_days_to_find_new_same_day_messages(self) -> None:
         upsert_activity(
             self.conn,
             Activity(
@@ -133,24 +149,94 @@ class TelegramArchiveTests(unittest.TestCase):
                 duration_minutes=10,
             ),
         )
+        update = {
+            "update_id": 13,
+            "message": {
+                "message_id": 8,
+                "date": int(datetime(2026, 7, 18, 12, 0, tzinfo=ZoneInfo("Europe/London")).timestamp()),
+                "from": {"id": 123},
+                "text": "10 situps",
+            },
+        }
 
         def runner(args, **kwargs):
-            raise AssertionError("SSH should not be called without blank days")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(update) + "\n")
 
-        result = sync_telegram_archive_for_blank_days(
+        result = sync_telegram_archive(
             self.conn,
             allowed_user_id=123,
             ssh_target="glitchslate@example",
             remote_dir="glitchslate-telegram-inbox",
             lookback_days=1,
-            parser=lambda text: {},
+            parser=lambda text: {
+                "is_workout": True,
+                "activity_type": "bodyweight",
+                "duration_minutes": 3,
+                "intensity": "moderate",
+                "notes": text,
+                "exercises": [
+                    {
+                        "movement": "situps",
+                        "sets": 1,
+                        "reps_per_set": 10,
+                        "total_reps": 10,
+                        "weight_kg": 0,
+                        "bodyweight": True,
+                        "movement_multiplier": 1,
+                    }
+                ],
+            },
             timezone_name="Europe/London",
             today=date(2026, 7, 19),
+            include_today=False,
             runner=runner,
         )
 
-        self.assertEqual(result.checked_days, [])
-        self.assertEqual(result.fetched_updates, 0)
+        rows = self.conn.execute("SELECT external_id FROM activities ORDER BY external_id").fetchall()
+        self.assertEqual(result.checked_days, ["2026-07-18"])
+        self.assertEqual(result.fetched_updates, 1)
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual([row["external_id"] for row in rows], ["8", "existing"])
+
+    def test_archive_sync_skips_existing_message_ids_without_parsing(self) -> None:
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="telegram",
+                external_id="8",
+                timestamp=datetime(2026, 7, 18, 9, 0, tzinfo=timezone.utc),
+                activity_type="workout",
+                duration_minutes=10,
+            ),
+        )
+        update = {
+            "update_id": 13,
+            "message": {
+                "message_id": 8,
+                "date": int(datetime(2026, 7, 18, 12, 0, tzinfo=ZoneInfo("Europe/London")).timestamp()),
+                "from": {"id": 123},
+                "text": "10 situps",
+            },
+        }
+
+        result = sync_telegram_archive(
+            self.conn,
+            allowed_user_id=123,
+            ssh_target="glitchslate@example",
+            remote_dir="glitchslate-telegram-inbox",
+            lookback_days=1,
+            parser=lambda text: (_ for _ in ()).throw(AssertionError("parser should not be called")),
+            timezone_name="Europe/London",
+            today=date(2026, 7, 19),
+            include_today=False,
+            runner=lambda args, **kwargs: subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout=json.dumps(update) + "\n",
+            ),
+        )
+
+        self.assertEqual(result.fetched_updates, 1)
         self.assertEqual(result.inserted, 0)
 
     def test_archive_sync_can_process_today_when_direct_sync_is_disabled(self) -> None:
@@ -168,7 +254,7 @@ class TelegramArchiveTests(unittest.TestCase):
             self.assertIn("2026-07-19", args[-1])
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(update) + "\n")
 
-        result = sync_telegram_archive_for_blank_days(
+        result = sync_telegram_archive(
             self.conn,
             allowed_user_id=123,
             ssh_target="glitchslate@example",

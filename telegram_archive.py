@@ -47,6 +47,17 @@ def telegram_blank_days(
     return days
 
 
+def telegram_archive_days(
+    *,
+    today: date,
+    lookback_days: int = 28,
+    include_today: bool = True,
+) -> list[str]:
+    start_day = today - timedelta(days=max(1, lookback_days))
+    end_day = today if include_today else today - timedelta(days=1)
+    return [(start_day + timedelta(days=offset)).isoformat() for offset in range((end_day - start_day).days + 1)]
+
+
 def _parse_jsonl(text: str) -> list[dict[str, Any]]:
     updates: list[dict[str, Any]] = []
     for line in text.splitlines():
@@ -92,7 +103,7 @@ def fetch_remote_archive_days(
     return _parse_jsonl(result.stdout)
 
 
-def sync_telegram_archive_for_blank_days(
+def sync_telegram_archive(
     conn,
     *,
     allowed_user_id: int,
@@ -108,8 +119,7 @@ def sync_telegram_archive_for_blank_days(
 ) -> TelegramArchiveResult:
     tz = get_timezone(timezone_name)
     local_today = today or datetime.now(tz).date()
-    days = telegram_blank_days(
-        conn,
+    days = telegram_archive_days(
         today=local_today,
         lookback_days=lookback_days,
         include_today=include_today,
@@ -128,9 +138,14 @@ def sync_telegram_archive_for_blank_days(
         dry_run=dry_run,
         timezone_name=timezone_name,
         allowed_local_dates=set(days),
+        skip_existing=True,
     )
     return TelegramArchiveResult(
         checked_days=days,
         fetched_updates=len(updates),
         inserted=inserted,
     )
+
+
+def sync_telegram_archive_for_blank_days(*args: Any, **kwargs: Any) -> TelegramArchiveResult:
+    return sync_telegram_archive(*args, **kwargs)

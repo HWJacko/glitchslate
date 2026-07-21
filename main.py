@@ -22,7 +22,7 @@ from db import (
 from os_sync import cleanup_old_wallpapers, set_wallpaper
 from sentient_log import fallback_sentient_log, generate_sentient_log
 from strava_sync import sync_strava
-from telegram_archive import sync_telegram_archive_for_blank_days
+from telegram_archive import sync_telegram_archive
 from telegram_sync import sync_telegram
 from visual_engine import render_wallpaper
 
@@ -89,7 +89,7 @@ def run_pipeline(
         archive_ssh = os.getenv("HETZNER_TELEGRAM_SSH")
         if telegram_user and archive_ssh:
             try:
-                archive_result = sync_telegram_archive_for_blank_days(
+                archive_result = sync_telegram_archive(
                     conn,
                     allowed_user_id=int(telegram_user),
                     ssh_target=archive_ssh,
@@ -102,7 +102,7 @@ def run_pipeline(
                 )
                 print(
                     "telegram archive checked "
-                    f"{len(archive_result.checked_days)} blank days, "
+                    f"{len(archive_result.checked_days)} recent days, "
                     f"fetched {archive_result.fetched_updates} updates, "
                     f"synced {archive_result.inserted} workout activity records"
                 )

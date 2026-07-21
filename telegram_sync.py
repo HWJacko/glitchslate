@@ -250,6 +250,7 @@ def sync_telegram_updates(
     dry_run: bool = False,
     timezone_name: str | None = None,
     allowed_local_dates: set[str] | None = None,
+    skip_existing: bool = False,
 ) -> int:
     inserted = 0
     tz = get_timezone(timezone_name)
@@ -265,11 +266,20 @@ def sync_telegram_updates(
         text = message.get("text")
         if not text:
             continue
+        external_id = str(message["message_id"])
 
         message_datetime = _message_datetime(message)
         if allowed_local_dates is not None:
             local_date = message_datetime.astimezone(tz).date().isoformat()
             if local_date not in allowed_local_dates:
+                continue
+
+        if skip_existing:
+            row = conn.execute(
+                "SELECT 1 FROM activities WHERE source = 'telegram' AND external_id = ?",
+                (external_id,),
+            ).fetchone()
+            if row is not None:
                 continue
 
         if dry_run:
@@ -292,7 +302,7 @@ def sync_telegram_updates(
 
         activity = Activity(
             source="telegram",
-            external_id=str(message["message_id"]),
+            external_id=external_id,
             timestamp=message_datetime,
             activity_type=str(parsed.get("activity_type") or "workout"),
             duration_minutes=duration,
