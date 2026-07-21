@@ -26,10 +26,12 @@ def telegram_blank_days(
     *,
     today: date,
     lookback_days: int = 28,
+    include_today: bool = False,
 ) -> list[str]:
     start_day = today - timedelta(days=max(1, lookback_days))
+    end_day = today if include_today else today - timedelta(days=1)
     days: list[str] = []
-    for offset in range((today - start_day).days):
+    for offset in range((end_day - start_day).days + 1):
         day = start_day + timedelta(days=offset)
         day_key = day.isoformat()
         row = conn.execute(
@@ -100,11 +102,17 @@ def sync_telegram_archive_for_blank_days(
     dry_run: bool = False,
     timezone_name: str | None = None,
     today: date | None = None,
+    include_today: bool = False,
     runner: RemoteRunner = subprocess.run,
 ) -> TelegramArchiveResult:
     tz = get_timezone(timezone_name)
     local_today = today or datetime.now(tz).date()
-    days = telegram_blank_days(conn, today=local_today, lookback_days=lookback_days)
+    days = telegram_blank_days(
+        conn,
+        today=local_today,
+        lookback_days=lookback_days,
+        include_today=include_today,
+    )
     updates = fetch_remote_archive_days(
         days,
         ssh_target=ssh_target,

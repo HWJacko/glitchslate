@@ -39,6 +39,16 @@ class TelegramArchiveTests(unittest.TestCase):
 
         self.assertEqual(days, ["2026-07-17", "2026-07-19"])
 
+    def test_blank_days_can_include_today_when_archive_is_primary_receiver(self) -> None:
+        days = telegram_blank_days(
+            self.conn,
+            today=date(2026, 7, 20),
+            lookback_days=1,
+            include_today=True,
+        )
+
+        self.assertEqual(days, ["2026-07-19", "2026-07-20"])
+
     def test_fetch_remote_archive_days_reads_only_requested_day_files(self) -> None:
         update = {"update_id": 12, "message": {"message_id": 7, "from": {"id": 123}, "text": "20 pressups"}}
 
@@ -140,6 +150,57 @@ class TelegramArchiveTests(unittest.TestCase):
         self.assertEqual(result.checked_days, [])
         self.assertEqual(result.fetched_updates, 0)
         self.assertEqual(result.inserted, 0)
+
+    def test_archive_sync_can_process_today_when_direct_sync_is_disabled(self) -> None:
+        update = {
+            "update_id": 13,
+            "message": {
+                "message_id": 8,
+                "date": int(datetime(2026, 7, 19, 12, 0, tzinfo=ZoneInfo("Europe/London")).timestamp()),
+                "from": {"id": 123},
+                "text": "10 situps",
+            },
+        }
+
+        def runner(args, **kwargs):
+            self.assertIn("2026-07-19", args[-1])
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(update) + "\n")
+
+        result = sync_telegram_archive_for_blank_days(
+            self.conn,
+            allowed_user_id=123,
+            ssh_target="glitchslate@example",
+            remote_dir="glitchslate-telegram-inbox",
+            lookback_days=0,
+            parser=lambda text: {
+                "is_workout": True,
+                "activity_type": "bodyweight",
+                "duration_minutes": 3,
+                "intensity": "moderate",
+                "notes": text,
+                "exercises": [
+                    {
+                        "movement": "situps",
+                        "sets": 1,
+                        "reps_per_set": 10,
+                        "total_reps": 10,
+                        "weight_kg": 0,
+                        "bodyweight": True,
+                        "movement_multiplier": 1,
+                    }
+                ],
+            },
+            timezone_name="Europe/London",
+            today=date(2026, 7, 19),
+            include_today=True,
+            runner=runner,
+        )
+
+        row = self.conn.execute("SELECT external_id, local_date, points FROM activities").fetchone()
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(row["external_id"], "8")
+        self.assertEqual(row["local_date"], "2026-07-19")
+        self.assertEqual(row["points"], 30)
 
     def test_collector_archives_allowed_text_and_removes_old_files(self) -> None:
         inbox = Path(self.tmpdir.name) / "inbox"

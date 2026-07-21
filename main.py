@@ -98,6 +98,7 @@ def run_pipeline(
                     dry_run=dry_run,
                     timezone_name=timezone_name,
                     today=today,
+                    include_today=not direct_telegram_enabled,
                 )
                 print(
                     "telegram archive checked "
