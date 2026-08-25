@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from config import get_timezone, load_dotenv
 from db import Activity, connect, get_sync_state, init_db, set_sync_state, upsert_activity
+from known_workouts import parse_known_workout
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -62,6 +63,7 @@ def _workout_prompt(text: str) -> str:
         "Extract workout information from this message. Return only JSON with keys "
         "is_workout, activity_type, duration_minutes, intensity, notes, exercises. "
         "Use is_workout=false when the text is not a workout check-in. If the message describes sets, reps, weights, or bodyweight exercises but not duration, infer a conservative duration_minutes estimate from the described work. "
+        "Known workout: CINDY means 5 pullups, 10 situps, and 15 standing squats per round, repeated as many rounds as possible in 20 minutes. For a message like 'CINDY 7 rounds', expand exercises to 35 pullups, 70 situps, and 105 standing squats. "
         "For exercises, return one object per movement with total_reps, weight_kg, bodyweight, and movement_multiplier. Use weight_kg=0 when no external load is specified, bodyweight=true for bodyweight movements, movement_multiplier=1 unless the movement is clearly partial or unusually demanding, and exercises=[] when reps/loads are unclear.\n\n"
         f"Message: {text}"
     )
@@ -286,13 +288,15 @@ def sync_telegram_updates(
             print(f"telegram:{message.get('message_id')}: {text}")
             continue
 
-        if workout_parser is None:
-            workout_parser = get_workout_parser()
-        try:
-            parsed = workout_parser(text)
-        except Exception as exc:
-            print(f"Telegram parse failed: {exc}", file=sys.stderr)
-            continue
+        parsed = parse_known_workout(text)
+        if parsed is None:
+            if workout_parser is None:
+                workout_parser = get_workout_parser()
+            try:
+                parsed = workout_parser(text)
+            except Exception as exc:
+                print(f"Telegram parse failed: {exc}", file=sys.stderr)
+                continue
         if not parsed.get("is_workout"):
             continue
 

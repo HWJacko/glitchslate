@@ -125,6 +125,40 @@ class TelegramSyncTests(unittest.TestCase):
         self.assertEqual(row["duration_minutes"], 45)
         self.assertEqual(row["points"], 300)
 
+    def test_known_cindy_submission_is_scored_without_model_parser(self) -> None:
+        def request_get(url, params, timeout):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 9,
+                        "message": {
+                            "message_id": 78,
+                            "date": 1783929600,
+                            "from": {"id": 123},
+                            "text": "CINDY 7 Rounds",
+                        },
+                    }
+                ],
+            }
+
+        count = sync_telegram(
+            self.conn,
+            token="token",
+            allowed_user_id=123,
+            parser=lambda text: (_ for _ in ()).throw(AssertionError("parser should not be called")),
+            request_get=request_get,
+        )
+
+        row = self.conn.execute(
+            "SELECT activity_type, duration_minutes, intensity, notes, points FROM activities"
+        ).fetchone()
+        self.assertEqual(count, 1)
+        self.assertEqual(row["activity_type"], "bodyweight")
+        self.assertEqual(row["duration_minutes"], 20)
+        self.assertEqual(row["intensity"], "hard")
+        self.assertEqual(row["notes"], "CINDY 7 rounds")
+        self.assertEqual(row["points"], 630)
 
     def test_dry_run_does_not_persist_offset_or_activity(self) -> None:
         def request_get(url, params, timeout):
