@@ -24,6 +24,7 @@ class RenderDiagnostics:
     max_day_points: int
     bar_scale_points: float
     status: str
+    criticality_factor: float
     today_points: int
     gap_days: int
     vignette_mode: str
@@ -41,6 +42,34 @@ class RenderResult:
 
 def calculate_glitch_factor(score: int) -> float:
     return max(0.0, min(1.0, (100 - score) / 100))
+
+
+def criticality_factor_for_time(
+    moment: datetime,
+    *,
+    start_hour: int = 6,
+    full_hour: int = 22,
+    min_factor: float = 0.15,
+) -> float:
+    if full_hour <= start_hour:
+        raise ValueError("full_hour must be after start_hour")
+    if not 0 <= min_factor <= 1:
+        raise ValueError("min_factor must be between 0 and 1")
+
+    hour = moment.hour + moment.minute / 60 + moment.second / 3600
+    if hour <= start_hour:
+        return min_factor
+    if hour >= full_hour:
+        return 1.0
+    progress = (hour - start_hour) / (full_hour - start_hour)
+    return min_factor + (1.0 - min_factor) * progress
+
+
+def score_with_time_criticality(score: int, criticality_factor: float) -> int:
+    factor = max(0.0, min(1.0, criticality_factor))
+    clamped_score = max(0, min(100, score))
+    shortfall = 100 - clamped_score
+    return int(round(max(0, min(100, 100 - shortfall * factor))))
 
 
 def system_status(score: int) -> str:
@@ -61,14 +90,21 @@ def vignette_mode(score: int) -> str:
     return "neutral"
 
 
-def systemd_status_lines(today_points: int, gap_days: int, *, alert_gap_days: int = 3) -> list[str]:
+def systemd_status_lines(
+    today_points: int,
+    gap_days: int,
+    *,
+    alert_gap_days: int = 3,
+    criticality_score: int | None = None,
+) -> list[str]:
     if today_points > 0:
         return [
             "● kinetic_drive.service - Active (Running) since 4h ago",
             "● cardio_subsystem.status - NOMINAL (98% efficiency)",
             "● motivation_daemon.bin - Active (Running)",
         ]
-    if gap_days >= alert_gap_days:
+    score_allows_alert = criticality_score is None or criticality_score < 50
+    if gap_days >= alert_gap_days and score_allows_alert:
         return [
             "● kinetic_drive.service - Inactive (Dead)",
             "● cardio_subsystem.status - DEGRADED (Low physical input)",
@@ -285,6 +321,7 @@ def render_wallpaper(
     show_systemd_box: bool = True,
     show_vignette: bool = True,
     systemd_alert_gap_days: int = 3,
+    criticality_factor: float = 1.0,
 ) -> RenderResult:
     config = visual_config or VisualConfig(target_resolution=f"{width}x{height}")
     output_path = Path(output_dir)
@@ -412,7 +449,12 @@ def render_wallpaper(
                 draw.text((detail_x, detail_y + offset * max(11, int(height * 0.017))), line, fill=fill, font=small_font)
 
         if show_systemd_box:
-            systemd_lines = systemd_status_lines(today_points, gap_days, alert_gap_days=systemd_alert_gap_days)
+            systemd_lines = systemd_status_lines(
+                today_points,
+                gap_days,
+                alert_gap_days=systemd_alert_gap_days,
+                criticality_score=score,
+            )
             log_x = chart_left
             log_y = int(height * 0.845)
             line_step = max(11, int(height * 0.017))
@@ -449,6 +491,7 @@ def render_wallpaper(
             max_day_points=max_points,
             bar_scale_points=bar_scale,
             status=status,
+            criticality_factor=max(0.0, min(1.0, criticality_factor)),
             today_points=today_points,
             gap_days=gap_days,
             vignette_mode=vignette,

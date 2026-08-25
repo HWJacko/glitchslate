@@ -18,6 +18,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.sentient_log.model, "gpt-4o-mini")
         self.assertTrue(config.telemetry.show_systemd_box)
         self.assertEqual(config.telemetry.gap_alert_days, 3)
+        self.assertTrue(config.telemetry.criticality_ramp_enabled)
+        self.assertEqual(config.telemetry.criticality_ramp_start_hour, 6)
+        self.assertEqual(config.telemetry.criticality_ramp_full_hour, 22)
+        self.assertEqual(config.telemetry.criticality_ramp_min_factor, 0.15)
         self.assertFalse(config.telegram_archive.enabled)
         self.assertEqual(config.telegram_archive.blank_lookback_days, 28)
 

@@ -53,6 +53,10 @@ class SentientLogConfig:
 class TelemetryConfig:
     show_systemd_box: bool = True
     gap_alert_days: int = 3
+    criticality_ramp_enabled: bool = True
+    criticality_ramp_start_hour: int = 6
+    criticality_ramp_full_hour: int = 22
+    criticality_ramp_min_factor: float = 0.15
     show_vignette: bool = True
 
 
@@ -157,6 +161,10 @@ def default_config_dict() -> dict[str, Any]:
         "telemetry": {
             "show_systemd_box": True,
             "gap_alert_days": 3,
+            "criticality_ramp_enabled": True,
+            "criticality_ramp_start_hour": 6,
+            "criticality_ramp_full_hour": 22,
+            "criticality_ramp_min_factor": 0.15,
             "show_vignette": True,
         },
         "telegram_archive": {
@@ -234,6 +242,14 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("sentient_log.max_chars must be positive")
     if config.telemetry.gap_alert_days <= 0:
         raise ValueError("telemetry.gap_alert_days must be positive")
+    if not 0 <= config.telemetry.criticality_ramp_start_hour <= 23:
+        raise ValueError("telemetry.criticality_ramp_start_hour must be between 0 and 23")
+    if not 1 <= config.telemetry.criticality_ramp_full_hour <= 24:
+        raise ValueError("telemetry.criticality_ramp_full_hour must be between 1 and 24")
+    if config.telemetry.criticality_ramp_full_hour <= config.telemetry.criticality_ramp_start_hour:
+        raise ValueError("telemetry.criticality_ramp_full_hour must be after criticality_ramp_start_hour")
+    if not 0 <= config.telemetry.criticality_ramp_min_factor <= 1:
+        raise ValueError("telemetry.criticality_ramp_min_factor must be between 0 and 1")
     if config.telegram_archive.blank_lookback_days <= 0:
         raise ValueError("telegram_archive.blank_lookback_days must be positive")
     if config.telegram_archive.blank_lookback_days > 28:

@@ -25,6 +25,10 @@ sentient_log:
 telemetry:
   show_systemd_box: true
   gap_alert_days: 3
+  criticality_ramp_enabled: true
+  criticality_ramp_start_hour: 6
+  criticality_ramp_full_hour: 22
+  criticality_ramp_min_factor: 0.15
   show_vignette: true
 
 telegram_archive:

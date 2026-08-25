@@ -38,7 +38,8 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 - System status labels: `STABLE`, `DRIFTING`, `AT RISK`, `CRITICAL`.
 - Optional OpenAI-generated sentient status log rendered on the wallpaper.
 - Pseudo-systemd telemetry box based on today's workout volume and inactivity gap.
-- Score-dependent edge vignette.
+- Time-ramped criticality so warning states stay quieter early and become more urgent later in the day.
+- Criticality-dependent edge vignette.
 - macOS wallpaper application through `osascript`.
 - Optional hourly macOS LaunchAgent.
 
@@ -68,6 +69,8 @@ baseline_daily_points = average daily workout points over the last 30 local cale
 expected_daily_points = max(min_expected_5_day_points / 5, baseline_daily_points)
 score = clamp(round((today_points / expected_daily_points) * 100), 0, 100)
 ```
+
+The persisted score remains the raw activity score. For wallpaper rendering and the optional sentient log, Glitchslate applies a configurable daytime criticality ramp to the score shortfall. With the default config, shortfall severity is 15% strength before 06:00 and increases linearly to full strength by 22:00, so a blank morning is quieter than a blank evening.
 
 For Strava runs, `running_value` is derived from Strava fields already stored in `raw_payload`: `moving_time`, `distance`, `average_speed`, `total_elevation_gain`, and `sport_type`. Pace and elevation adjust a base running value, while minutes remain stored as context.
 

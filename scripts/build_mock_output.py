@@ -28,7 +28,7 @@ from db import (
     upsert_activity,
 )
 from sentient_log import fallback_sentient_log
-from visual_engine import render_wallpaper, systemd_status_lines
+from visual_engine import criticality_factor_for_time, render_wallpaper, score_with_time_criticality, systemd_status_lines
 
 
 DEFAULT_END_DAY = date(2026, 7, 13)
@@ -172,17 +172,29 @@ def build_mock_output(
     today_points = points_for_day(conn, end_day)
     gap_days = current_gap_days(conn, end_day=end_day)
     last_run_details = get_last_run_details(conn)
+    render_timestamp = datetime(end_day.year, end_day.month, end_day.day, 12, 0, 0, tzinfo=tz)
+    criticality_factor = (
+        criticality_factor_for_time(
+            render_timestamp,
+            start_hour=app_config.telemetry.criticality_ramp_start_hour,
+            full_hour=app_config.telemetry.criticality_ramp_full_hour,
+            min_factor=app_config.telemetry.criticality_ramp_min_factor,
+        )
+        if app_config.telemetry.criticality_ramp_enabled
+        else 1.0
+    )
+    display_score = score_with_time_criticality(score.score, criticality_factor)
     sentient_log = fallback_sentient_log(
-        score=score.score,
+        score=display_score,
         streak_days=score.streak_days,
         today_points=today_points,
         max_chars=app_config.sentient_log.max_chars,
     )
     render_result = render_wallpaper(
-        score=score.score,
+        score=display_score,
         day=end_day.isoformat(),
         output_dir=assets_dir,
-        timestamp=datetime(end_day.year, end_day.month, end_day.day, 12, 0, 0),
+        timestamp=render_timestamp,
         width=render_width,
         height=render_height,
         visual_config=app_config.visual,
@@ -197,6 +209,7 @@ def build_mock_output(
         show_systemd_box=app_config.telemetry.show_systemd_box,
         show_vignette=app_config.telemetry.show_vignette,
         systemd_alert_gap_days=app_config.telemetry.gap_alert_days,
+        criticality_factor=criticality_factor,
     )
 
     start_day = end_day - timedelta(days=44)
@@ -232,6 +245,8 @@ def build_mock_output(
         "wallpaper_current": str(render_result.current_path),
         "date": score.date,
         "score": score.score,
+        "display_score": display_score,
+        "criticality_factor": criticality_factor,
         "streak_days": score.streak_days,
         "streak_pending": score.streak_pending,
         "total_minutes": score.total_minutes,
@@ -245,7 +260,12 @@ def build_mock_output(
         "today_minutes": today_minutes,
         "today_points": today_points,
         "gap_days": gap_days,
-        "systemd_lines": systemd_status_lines(today_points, gap_days, alert_gap_days=app_config.telemetry.gap_alert_days),
+        "systemd_lines": systemd_status_lines(
+            today_points,
+            gap_days,
+            alert_gap_days=app_config.telemetry.gap_alert_days,
+            criticality_score=display_score,
+        ),
         "sentient_log": sentient_log,
         "activity_count": len(entries),
         "source_counts": source_counts,
@@ -261,6 +281,7 @@ def build_mock_output(
             "max_day_points": render_result.diagnostics.max_day_points,
             "bar_scale_points": render_result.diagnostics.bar_scale_points,
             "status": render_result.diagnostics.status,
+            "criticality_factor": render_result.diagnostics.criticality_factor,
             "vignette_mode": render_result.diagnostics.vignette_mode,
             "sentient_log_present": render_result.diagnostics.sentient_log_present,
         },

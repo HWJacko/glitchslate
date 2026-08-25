@@ -7,7 +7,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from os_sync import set_wallpaper
-from visual_engine import calculate_glitch_factor, render_wallpaper, system_status, systemd_status_lines, vignette_mode
+from visual_engine import (
+    calculate_glitch_factor,
+    criticality_factor_for_time,
+    render_wallpaper,
+    score_with_time_criticality,
+    system_status,
+    systemd_status_lines,
+    vignette_mode,
+)
 
 
 class VisualAndOsTests(unittest.TestCase):
@@ -21,6 +29,18 @@ class VisualAndOsTests(unittest.TestCase):
         self.assertEqual(system_status(35), "AT RISK")
         self.assertEqual(system_status(10), "CRITICAL")
 
+    def test_time_criticality_ramps_shortfall_through_day(self) -> None:
+        morning = datetime(2026, 7, 30, 6, 0)
+        midday = datetime(2026, 7, 30, 14, 0)
+        evening = datetime(2026, 7, 30, 22, 0)
+
+        self.assertEqual(criticality_factor_for_time(morning), 0.15)
+        self.assertAlmostEqual(criticality_factor_for_time(midday), 0.575)
+        self.assertEqual(criticality_factor_for_time(evening), 1.0)
+        self.assertEqual(score_with_time_criticality(0, 0.15), 85)
+        self.assertEqual(score_with_time_criticality(0, 1.0), 0)
+        self.assertEqual(score_with_time_criticality(50, 0.5), 75)
+
     def test_systemd_and_vignette_modes(self) -> None:
         self.assertEqual(vignette_mode(95), "cyan")
         self.assertEqual(vignette_mode(65), "neutral")
@@ -28,6 +48,8 @@ class VisualAndOsTests(unittest.TestCase):
         self.assertIn("NOMINAL", systemd_status_lines(20, 0)[1])
         self.assertIn("WARNING", systemd_status_lines(0, 1)[1])
         self.assertIn("DEGRADED", systemd_status_lines(0, 3)[1])
+        self.assertIn("WARNING", systemd_status_lines(0, 3, criticality_score=85)[1])
+        self.assertIn("DEGRADED", systemd_status_lines(0, 3, criticality_score=20)[1])
 
     def test_render_writes_timestamped_and_current_wallpapers(self) -> None:
         points = [
@@ -71,6 +93,7 @@ class VisualAndOsTests(unittest.TestCase):
             self.assertEqual(result.diagnostics.latest_day_points, 150)
             self.assertEqual(result.diagnostics.max_day_points, 150)
             self.assertEqual(result.diagnostics.status, "DRIFTING")
+            self.assertEqual(result.diagnostics.criticality_factor, 1.0)
             self.assertEqual(result.diagnostics.today_points, 25)
             self.assertEqual(result.diagnostics.gap_days, 0)
             self.assertEqual(result.diagnostics.vignette_mode, "neutral")
