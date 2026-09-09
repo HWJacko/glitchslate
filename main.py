@@ -19,6 +19,7 @@ from db import (
     set_cached_sentient_log,
     set_sync_state,
 )
+from external_metrics import crypy_headline_metrics, portfolio_return_metric
 from os_sync import cleanup_old_wallpapers, set_wallpaper
 from sentient_log import fallback_sentient_log, generate_sentient_log
 from strava_sync import sync_strava
@@ -157,6 +158,18 @@ def run_pipeline(
         else 1.0
     )
     display_score = score_with_time_criticality(score.score, criticality_factor)
+    top_right_metrics = []
+    try:
+        portfolio_metric = portfolio_return_metric(now=local_now)
+    except Exception as exc:
+        _warn(f"Portfolio return warning: {exc}")
+    else:
+        if portfolio_metric is not None:
+            top_right_metrics.append(portfolio_metric)
+    try:
+        top_right_metrics.extend(crypy_headline_metrics())
+    except Exception as exc:
+        _warn(f"Crypy headline warning: {exc}")
 
     sentient_log = None
     if app_config.sentient_log.enabled and not dry_run:
@@ -212,6 +225,7 @@ def run_pipeline(
         show_vignette=app_config.telemetry.show_vignette,
         systemd_alert_gap_days=app_config.telemetry.gap_alert_days,
         criticality_factor=criticality_factor,
+        top_right_metrics=top_right_metrics,
     )
     if not app_config.visual.keep_archive_images:
         cleanup_old_wallpapers(assets_dir, older_than_hours=app_config.visual.archive_retention_hours)
@@ -242,7 +256,9 @@ def run_pipeline(
         f"bar_scale_points={result.diagnostics.bar_scale_points:.2f} "
         f"status={result.diagnostics.status} "
         f"vignette={result.diagnostics.vignette_mode} "
-        f"sentient_log={result.diagnostics.sentient_log_present}"
+        f"sentient_log={result.diagnostics.sentient_log_present} "
+        f"top_right_metrics={result.diagnostics.top_right_metric_count} "
+        f"stale_top_right_metrics={result.diagnostics.stale_top_right_metric_count}"
     )
     if dry_run and command:
         print("dry-run wallpaper command:", " ".join(command))

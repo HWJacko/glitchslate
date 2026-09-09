@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from os_sync import set_wallpaper
 from visual_engine import (
+    _metric_value_color,
     calculate_glitch_factor,
     criticality_factor_for_time,
     render_wallpaper,
@@ -51,6 +52,20 @@ class VisualAndOsTests(unittest.TestCase):
         self.assertIn("WARNING", systemd_status_lines(0, 3, criticality_score=85)[1])
         self.assertIn("DEGRADED", systemd_status_lines(0, 3, criticality_score=20)[1])
 
+    def test_metric_value_color_uses_polarity(self) -> None:
+        self.assertEqual(
+            _metric_value_color({"polarity": "positive"}, positive="green", negative="red", neutral="white"),
+            "green",
+        )
+        self.assertEqual(
+            _metric_value_color({"polarity": "negative"}, positive="green", negative="red", neutral="white"),
+            "red",
+        )
+        self.assertEqual(
+            _metric_value_color({"polarity": "neutral"}, positive="green", negative="red", neutral="white"),
+            "white",
+        )
+
     def test_render_writes_timestamped_and_current_wallpapers(self) -> None:
         points = [
             {
@@ -85,6 +100,36 @@ class VisualAndOsTests(unittest.TestCase):
                     "elevation_m": 12,
                 },
                 sentient_log="Crew output nominal; systems remain within baseline.",
+                top_right_metrics=[
+                    {
+                        "label": "PORTFOLIO RETURN",
+                        "value": "-0.24%",
+                        "status": "STALE",
+                        "stale": True,
+                        "polarity": "negative",
+                    },
+                    {
+                        "label": "CRYPY PORTFOLIO",
+                        "value": "GBP 1234.56",
+                        "status": "LIVE",
+                        "stale": False,
+                        "polarity": "neutral",
+                    },
+                    {
+                        "label": "CRYPY VS BTC 1D",
+                        "value": "+1.20%",
+                        "status": "LIVE",
+                        "stale": False,
+                        "polarity": "positive",
+                    },
+                    {
+                        "label": "CRYPY REALISED 1D",
+                        "value": "GBP -12.00",
+                        "status": "LIVE",
+                        "stale": False,
+                        "polarity": "negative",
+                    },
+                ],
             )
             self.assertTrue(result.timestamped_path.exists())
             self.assertTrue(result.current_path.exists())
@@ -98,6 +143,8 @@ class VisualAndOsTests(unittest.TestCase):
             self.assertEqual(result.diagnostics.gap_days, 0)
             self.assertEqual(result.diagnostics.vignette_mode, "neutral")
             self.assertTrue(result.diagnostics.sentient_log_present)
+            self.assertEqual(result.diagnostics.top_right_metric_count, 4)
+            self.assertEqual(result.diagnostics.stale_top_right_metric_count, 1)
 
     def test_os_sync_dry_run_does_not_call_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

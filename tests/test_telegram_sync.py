@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from db import connect, get_sync_state, init_db
 from telegram_sync import _request_get, get_workout_parser, parse_workout_with_openai, sync_telegram
@@ -159,6 +162,88 @@ class TelegramSyncTests(unittest.TestCase):
         self.assertEqual(row["intensity"], "hard")
         self.assertEqual(row["notes"], "CINDY 7 rounds")
         self.assertEqual(row["points"], 630)
+
+    def test_known_cindy_with_uk_date_is_applied_historically(self) -> None:
+        message_timestamp = int(datetime(2026, 9, 9, 18, 30, tzinfo=ZoneInfo("Europe/London")).timestamp())
+
+        def request_get(url, params, timeout):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 10,
+                        "message": {
+                            "message_id": 79,
+                            "date": message_timestamp,
+                            "from": {"id": 123},
+                            "text": "CINDY 20 ROUNDS - 08/09/26",
+                        },
+                    }
+                ],
+            }
+
+        count = sync_telegram(
+            self.conn,
+            token="token",
+            allowed_user_id=123,
+            parser=lambda text: (_ for _ in ()).throw(AssertionError("parser should not be called")),
+            request_get=request_get,
+            timezone_name="Europe/London",
+        )
+
+        row = self.conn.execute(
+            "SELECT local_date, timestamp, notes, raw_payload FROM activities WHERE source = 'telegram'"
+        ).fetchone()
+        raw_payload = json.loads(row["raw_payload"])
+        self.assertEqual(count, 1)
+        self.assertEqual(row["local_date"], "2026-09-08")
+        self.assertEqual(row["timestamp"], "2026-09-08T17:30:00+00:00")
+        self.assertEqual(row["notes"], "CINDY 20 rounds")
+        self.assertEqual(raw_payload["submitted_local_date"], "2026-09-08")
+
+    def test_historical_date_is_removed_before_model_parsing(self) -> None:
+        parsed_texts = []
+
+        def request_get(url, params, timeout):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 11,
+                        "message": {
+                            "message_id": 80,
+                            "date": int(datetime(2026, 9, 9, 18, 30, tzinfo=ZoneInfo("Europe/London")).timestamp()),
+                            "from": {"id": 123},
+                            "text": "45 minutes strength - 08/09/26",
+                        },
+                    }
+                ],
+            }
+
+        def parser(text):
+            parsed_texts.append(text)
+            return {
+                "is_workout": True,
+                "activity_type": "strength",
+                "duration_minutes": 45,
+                "intensity": "medium",
+                "notes": "Upper body",
+                "exercises": [],
+            }
+
+        count = sync_telegram(
+            self.conn,
+            token="token",
+            allowed_user_id=123,
+            parser=parser,
+            request_get=request_get,
+            timezone_name="Europe/London",
+        )
+
+        row = self.conn.execute("SELECT local_date FROM activities WHERE source = 'telegram'").fetchone()
+        self.assertEqual(count, 1)
+        self.assertEqual(parsed_texts, ["45 minutes strength"])
+        self.assertEqual(row["local_date"], "2026-09-08")
 
     def test_dry_run_does_not_persist_offset_or_activity(self) -> None:
         def request_get(url, params, timeout):

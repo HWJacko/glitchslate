@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 from config import get_timezone, load_dotenv
@@ -17,6 +18,11 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 
 ParsedWorkout = dict[str, Any]
 Parser = Callable[[str], ParsedWorkout]
+
+
+HISTORICAL_DATE_SUFFIX_RE = re.compile(
+    r"(?P<separator>\s*(?:[-:,]\s*)?)(?P<day>\d{1,2})[./-](?P<month>\d{1,2})[./-](?P<year>\d{2}|\d{4})\s*$"
+)
 
 
 WORKOUT_SCHEMA: dict[str, Any] = {
@@ -243,6 +249,34 @@ def _message_datetime(message: dict[str, Any]) -> datetime:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
 
+def _extract_historical_local_date(text: str) -> tuple[str, date | None]:
+    match = HISTORICAL_DATE_SUFFIX_RE.search(text)
+    if match is None:
+        return text, None
+
+    day = int(match.group("day"))
+    month = int(match.group("month"))
+    year_text = match.group("year")
+    year = int(year_text)
+    if len(year_text) == 2:
+        year += 2000 if year <= 68 else 1900
+
+    try:
+        submitted_date = date(year, month, day)
+    except ValueError:
+        return text, None
+
+    cleaned_text = text[: match.start("separator")].strip()
+    return cleaned_text or text, submitted_date
+
+
+def _timestamp_for_local_date(message_datetime: datetime, submitted_date: date | None, tz) -> datetime:
+    if submitted_date is None:
+        return message_datetime
+    local_message_time = message_datetime.astimezone(tz).time().replace(tzinfo=None)
+    return datetime.combine(submitted_date, local_message_time, tzinfo=tz).astimezone(timezone.utc)
+
+
 def sync_telegram_updates(
     conn,
     updates: list[dict[str, Any]],
@@ -288,12 +322,14 @@ def sync_telegram_updates(
             print(f"telegram:{message.get('message_id')}: {text}")
             continue
 
-        parsed = parse_known_workout(text)
+        workout_text, submitted_local_date = _extract_historical_local_date(text)
+
+        parsed = parse_known_workout(workout_text)
         if parsed is None:
             if workout_parser is None:
                 workout_parser = get_workout_parser()
             try:
-                parsed = workout_parser(text)
+                parsed = workout_parser(workout_text)
             except Exception as exc:
                 print(f"Telegram parse failed: {exc}", file=sys.stderr)
                 continue
@@ -304,15 +340,20 @@ def sync_telegram_updates(
         if duration <= 0:
             continue
 
+        activity_timestamp = _timestamp_for_local_date(message_datetime, submitted_local_date, tz)
+        raw_payload: dict[str, Any] = {"message": message, "parser_result": parsed}
+        if submitted_local_date is not None:
+            raw_payload["submitted_local_date"] = submitted_local_date.isoformat()
+
         activity = Activity(
             source="telegram",
             external_id=external_id,
-            timestamp=message_datetime,
+            timestamp=activity_timestamp,
             activity_type=str(parsed.get("activity_type") or "workout"),
             duration_minutes=duration,
             intensity=str(parsed.get("intensity") or "") or None,
             notes=str(parsed.get("notes") or "") or None,
-            raw_payload={"message": message, "parser_result": parsed},
+            raw_payload=raw_payload,
         )
         upsert_activity(conn, activity, tz=tz)
         inserted += 1

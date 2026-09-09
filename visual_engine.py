@@ -29,6 +29,8 @@ class RenderDiagnostics:
     gap_days: int
     vignette_mode: str
     sentient_log_present: bool
+    top_right_metric_count: int
+    stale_top_right_metric_count: int
 
 
 @dataclass(frozen=True)
@@ -300,6 +302,112 @@ def _format_pace(minutes_per_km: float) -> str:
     return f"{minutes}:{seconds:02d}/km"
 
 
+def _coerce_top_right_metrics(metrics: list[Any] | None) -> list[dict[str, Any]]:
+    coerced: list[dict[str, Any]] = []
+    for metric in metrics or []:
+        label = str(_field(metric, "label", "")).strip()
+        value = str(_field(metric, "value", "")).strip()
+        if not label or not value:
+            continue
+        coerced.append(
+            {
+                "label": label,
+                "value": value,
+                "status": str(_field(metric, "status", "")).strip(),
+                "stale": bool(_field(metric, "stale", False)),
+                "polarity": str(_field(metric, "polarity", "neutral")).strip().lower(),
+            }
+        )
+    return coerced
+
+
+def _metric_value_color(metric: dict[str, Any], *, positive, negative, neutral):
+    if metric.get("polarity") == "positive":
+        return positive
+    if metric.get("polarity") == "negative":
+        return negative
+    return neutral
+
+
+def _draw_top_right_metrics(
+    draw,
+    *,
+    metric_rows: list[dict[str, Any]],
+    width: int,
+    height: int,
+    right_edge: int,
+    top_edge: int,
+    text_color,
+    muted_color,
+    alert_color,
+    positive_color,
+    meta_font,
+    small_font,
+) -> None:
+    header = "EXTERNAL SIGNALS"
+    header_bbox = draw.textbbox((0, 0), header, font=small_font)
+    draw.text((right_edge - (header_bbox[2] - header_bbox[0]), top_edge), header, fill=muted_color, font=small_font)
+
+    if not metric_rows:
+        return
+
+    entries = metric_rows[:4]
+    grid_top = top_edge + int(height * 0.035)
+    col_gap = max(10, int(width * 0.01))
+    row_gap = max(8, int(height * 0.012))
+    cell_padding = max(4, int(height * 0.006))
+
+    def _metric_texts(metric: dict[str, Any]) -> tuple[str, str]:
+        value = str(metric["value"])
+        detail = str(metric["label"])
+        if metric["status"]:
+            detail = f"{detail} // {metric['status']}"
+        return value, detail
+
+    content_width = 0
+    value_height = 0
+    detail_height = 0
+    for metric in entries:
+        value, detail = _metric_texts(metric)
+        value_bbox = draw.textbbox((0, 0), value, font=meta_font)
+        detail_bbox = draw.textbbox((0, 0), detail, font=small_font)
+        content_width = max(content_width, value_bbox[2] - value_bbox[0], detail_bbox[2] - detail_bbox[0])
+        value_height = max(value_height, value_bbox[3] - value_bbox[1])
+        detail_height = max(detail_height, detail_bbox[3] - detail_bbox[1])
+
+    cell_width = max(
+        int(width * 0.11),
+        content_width + cell_padding * 2,
+    )
+    min_left = int(width * 0.52)
+    max_panel_width = max(2 * cell_padding + col_gap, right_edge - min_left)
+    panel_width = min(cell_width * 2 + col_gap, max_panel_width)
+    cell_width = max(1, (panel_width - col_gap) // 2)
+    panel_left = right_edge - panel_width
+    cell_height = max(value_height + detail_height + cell_padding * 3, int(height * 0.056))
+    total_height = cell_height * 2 + row_gap
+    grid_top = min(grid_top, max(top_edge + int(height * 0.03), int(height - total_height - int(height * 0.12))))
+
+    for index, metric in enumerate(entries):
+        row = index // 2
+        col = index % 2
+        cell_left = panel_left + col * (cell_width + col_gap)
+        cell_right = cell_left + cell_width
+        cell_top = grid_top + row * (cell_height + row_gap)
+
+        value, detail = _metric_texts(metric)
+        metric_color = _metric_value_color(metric, positive=positive_color, negative=alert_color, neutral=text_color)
+        value_bbox = draw.textbbox((0, 0), value, font=meta_font)
+        detail_bbox = draw.textbbox((0, 0), detail, font=small_font)
+        value_x = cell_right - (value_bbox[2] - value_bbox[0])
+        detail_x = cell_right - (detail_bbox[2] - detail_bbox[0])
+        detail_y = cell_top + (value_bbox[3] - value_bbox[1]) + cell_padding
+        detail_color = alert_color if metric["stale"] else muted_color
+
+        draw.text((value_x, cell_top), value, fill=metric_color, font=meta_font)
+        draw.text((detail_x, detail_y), detail, fill=detail_color, font=small_font)
+
+
 def render_wallpaper(
     *,
     score: int,
@@ -322,6 +430,7 @@ def render_wallpaper(
     show_vignette: bool = True,
     systemd_alert_gap_days: int = 3,
     criticality_factor: float = 1.0,
+    top_right_metrics: list[Any] | None = None,
 ) -> RenderResult:
     config = visual_config or VisualConfig(target_resolution=f"{width}x{height}")
     output_path = Path(output_dir)
@@ -338,6 +447,7 @@ def render_wallpaper(
     bar_scale = max(float(expected_recent_points), float(max_points), 1.0)
     status = system_status(score)
     vignette = vignette_mode(score) if show_vignette else "off"
+    metric_rows = _coerce_top_right_metrics(top_right_metrics)
 
     try:
         from PIL import Image, ImageDraw
@@ -351,6 +461,7 @@ def render_wallpaper(
         text = _hex_to_rgb(config.text_color)
         muted = _hex_to_rgb(config.muted_text_color)
         alert = _hex_to_rgb(config.alert_color)
+        positive = (34, 197, 94)
         run_color = _hex_to_rgb(config.active_gradient[0])
         other_color = _hex_to_rgb(config.active_gradient[1])
         best_color = (245, 208, 66)
@@ -432,6 +543,22 @@ def render_wallpaper(
             fill = status_color if "SYSTEM STATUS" in line else text if offset in {0, 2, 3, 4} else muted
             draw.text((header_x, header_y + offset * int(height * 0.04)), line, fill=fill, font=title_font if offset == 0 else meta_font)
 
+        if metric_rows:
+            _draw_top_right_metrics(
+                draw,
+                metric_rows=metric_rows,
+                width=width,
+                height=height,
+                right_edge=int(width * 0.93),
+                top_edge=header_y,
+                text_color=text,
+                muted_color=muted,
+                alert_color=alert,
+                positive_color=positive,
+                meta_font=meta_font,
+                small_font=small_font,
+            )
+
         footer = f"DAILY TOTALS // TARGET {int(round(expected_recent_points))}pt/DAY // RUN + OTHER // WINDOW END {day}"
         draw.text((chart_left, int(height * 0.80)), footer, fill=muted, font=small_font)
 
@@ -496,6 +623,8 @@ def render_wallpaper(
             gap_days=gap_days,
             vignette_mode=vignette,
             sentient_log_present=bool(sentient_log),
+            top_right_metric_count=len(metric_rows),
+            stale_top_right_metric_count=sum(1 for metric in metric_rows if metric["stale"]),
         ),
     )
 

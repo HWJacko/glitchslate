@@ -213,6 +213,12 @@ Example messages:
 45 min easy run
 ```
 
+To backdate a Telegram check-in, put a UK date at the end of the message:
+
+```text
+CINDY 20 ROUNDS - 08/09/26
+```
+
 ## Hetzner Telegram Archive
 
 Telegram bot updates expire if nothing receives them. To preserve backlog while the laptop sleeps, run the lightweight collector on Hetzner. It stores authorized text updates as dated JSONL files and removes files older than 28 days.
