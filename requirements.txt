@@ -1,5 +1,5 @@
 # Runtime dependencies
-openai>=1.0.0
+openai>=3.16.2
 pillow>=10.0.0
 PyYAML>=6.0.0
 requests>=2.31.0
