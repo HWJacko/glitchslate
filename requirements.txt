@@ -1,7 +1,7 @@
 # Runtime dependencies
 openai>=1.0.0
 pillow>=10.0.0
-PyYAML>=6.0.0
+PyYAML>=6.0.3
 requests>=2.31.0
 
 # Optional: only needed when WORKOUT_PARSER_PROVIDER=gemini
