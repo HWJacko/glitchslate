@@ -2,7 +2,7 @@
 openai>=1.0.0
 pillow>=10.0.0
 PyYAML>=6.0.0
-requests>=2.31.0
+requests>=2.34.2
 
 # Optional: only needed when WORKOUT_PARSER_PROVIDER=gemini
 google-genai>=1.0.0
