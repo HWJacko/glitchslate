@@ -11,21 +11,24 @@ from db import (
     calculate_daily_score,
     connect,
     current_gap_days,
-    daily_chart_points,
     get_cached_sentient_log,
     get_last_run_details,
     init_db,
     points_for_day,
+    rolling_chart_points,
     set_cached_sentient_log,
     set_sync_state,
 )
 from external_metrics import crypy_headline_metrics, portfolio_return_metric
 from os_sync import cleanup_old_wallpapers, set_wallpaper
 from sentient_log import fallback_sentient_log, generate_sentient_log
+from social_sync import social_snapshot_metric, sync_bluesky_posts
 from strava_sync import sync_strava
 from telegram_archive import sync_telegram_archive
 from telegram_sync import sync_telegram
+from telegram_sync import get_workout_parser
 from visual_engine import criticality_factor_for_time, render_wallpaper, score_with_time_criticality
+from writing_sync import sync_writing_projects
 
 
 def _warn(message: str) -> None:
@@ -60,13 +63,22 @@ def run_pipeline(
     conn = connect(db_path)
     init_db(conn)
     timezone_name = os.getenv("LOCAL_TIMEZONE", "Europe/London")
-    local_now = datetime.now(get_timezone(timezone_name))
+    timezone_info = get_timezone(timezone_name)
+    local_now = datetime.now(timezone_info)
     today = local_now.date()
     today_key = today.isoformat()
 
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_user = os.getenv("TELEGRAM_ALLOWED_USER_ID")
-    direct_telegram_enabled = _env_flag("TELEGRAM_DIRECT_SYNC", True)
+    direct_telegram_enabled = _env_flag(
+        "TELEGRAM_DIRECT_SYNC",
+        app_config.telegram.enabled and app_config.telegram.direct_sync,
+    )
+    workout_parser = get_workout_parser(
+        app_config.parser.provider,
+        openai_model=os.getenv("OPENAI_MODEL") or app_config.parser.openai_model,
+        gemini_model=os.getenv("GEMINI_MODEL") or app_config.parser.gemini_model,
+    )
     if direct_telegram_enabled and telegram_token and telegram_user:
         try:
             if telegram_replay_from is not None and not dry_run:
@@ -77,6 +89,9 @@ def run_pipeline(
                 allowed_user_id=int(telegram_user),
                 dry_run=dry_run,
                 timezone_name=timezone_name,
+                parser=workout_parser,
+                request_timeout=app_config.telegram.request_timeout_seconds,
+                max_message_chars=app_config.parser.max_message_chars,
             )
             print(f"telegram synced {telegram_count} workout activity records")
         except Exception as exc:
@@ -86,7 +101,10 @@ def run_pipeline(
     else:
         _warn("Telegram sync skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_USER_ID is missing")
 
-    archive_enabled = _env_flag("TELEGRAM_ARCHIVE_ENABLED", app_config.telegram_archive.enabled)
+    archive_enabled = _env_flag(
+        "TELEGRAM_ARCHIVE_ENABLED",
+        app_config.telegram.enabled and (app_config.telegram.archive_enabled or app_config.telegram_archive.enabled),
+    )
     if archive_enabled:
         archive_ssh = os.getenv("HETZNER_TELEGRAM_SSH")
         if telegram_user and archive_ssh:
@@ -101,6 +119,8 @@ def run_pipeline(
                     timezone_name=timezone_name,
                     today=today,
                     include_today=not direct_telegram_enabled,
+                    timeout=app_config.telegram_archive.timeout_seconds,
+                    parser=workout_parser,
                 )
                 print(
                     "telegram archive checked "
@@ -116,7 +136,9 @@ def run_pipeline(
     strava_client_id = os.getenv("STRAVA_CLIENT_ID")
     strava_client_secret = os.getenv("STRAVA_CLIENT_SECRET")
     strava_refresh_token = os.getenv("STRAVA_REFRESH_TOKEN")
-    if strava_client_id and strava_client_secret and strava_refresh_token:
+    if not app_config.strava.enabled:
+        _warn("Strava sync skipped: disabled in config")
+    elif strava_client_id and strava_client_secret and strava_refresh_token:
         try:
             strava_count = sync_strava(
                 conn,
@@ -125,12 +147,57 @@ def run_pipeline(
                 refresh_token_value=strava_refresh_token,
                 dry_run=dry_run,
                 timezone_name=timezone_name,
+                lookback_days=app_config.strava.lookback_days,
+                request_timeout=app_config.strava.request_timeout_seconds,
             )
             print(f"strava synced {strava_count} run activity records")
         except Exception as exc:
             _warn(f"Strava sync warning: {exc}")
     else:
         _warn("Strava sync skipped: Strava credentials are incomplete")
+
+    if app_config.writing.enabled:
+        writing_snapshots = sync_writing_projects(
+            conn,
+            projects=app_config.writing.projects,
+            today=today,
+            now=local_now,
+            tz=timezone_info,
+            dry_run=dry_run,
+        )
+        for snapshot in writing_snapshots:
+            if snapshot.stale:
+                _warn(f"Writing sync warning for {snapshot.project_id}: {snapshot.status}")
+            else:
+                print(
+                    "writing synced "
+                    f"{snapshot.project_id} total_words={snapshot.total_words} "
+                    f"delta_words={snapshot.delta_words} "
+                    f"day_words={snapshot.day_words} "
+                    f"week_words={snapshot.week_words}/{snapshot.weekly_goal_words}"
+                )
+
+    social_metric = None
+    if app_config.social.enabled:
+        social_snapshot = sync_bluesky_posts(
+            conn,
+            url=app_config.social.bluesky_rss_url,
+            today=today,
+            tz=timezone_info,
+            reminder_after_days=app_config.social.reminder_after_days,
+            post_points=app_config.social.post_points,
+            timeout=app_config.social.timeout_seconds,
+            dry_run=dry_run,
+        )
+        social_metric = social_snapshot_metric(social_snapshot)
+        if social_snapshot.stale:
+            _warn(f"Bluesky sync warning: {social_snapshot.status}")
+        else:
+            print(
+                "bluesky synced "
+                f"{social_snapshot.post_count} feed posts; "
+                f"days_since_latest_post={social_snapshot.days_since_latest_post}"
+            )
 
     score = calculate_daily_score(
         conn,
@@ -139,13 +206,16 @@ def run_pipeline(
         scoring_config=app_config.scoring,
         persist=not dry_run,
     )
-    chart_points = daily_chart_points(
+    chart_window_days = app_config.chart.rolling_window_days
+    chart_points = rolling_chart_points(
         conn,
         end_day=today,
-        point_count=app_config.scoring.baseline_window_days,
+        point_count=app_config.chart.history_days,
+        window_days=chart_window_days,
     )
-    today_points = points_for_day(conn, today)
-    gap_days = current_gap_days(conn, end_day=today)
+    chart_target_points = score.expected_recent_points * chart_window_days
+    today_points = points_for_day(conn, today, source_names=app_config.scoring.included_sources)
+    gap_days = current_gap_days(conn, end_day=today, source_names=app_config.scoring.included_sources)
     last_run_details = get_last_run_details(conn)
     criticality_factor = (
         criticality_factor_for_time(
@@ -159,15 +229,32 @@ def run_pipeline(
     )
     display_score = score_with_time_criticality(score.score, criticality_factor)
     top_right_metrics = []
+    if social_metric is not None:
+        top_right_metrics.append(social_metric)
+    portfolio_path = (
+        app_config.external_metrics.portfolio_return_path
+        if app_config.external_metrics.portfolio_return_enabled
+        else None
+    )
     try:
-        portfolio_metric = portfolio_return_metric(now=local_now)
+        portfolio_metric = portfolio_return_metric(portfolio_path, now=local_now)
     except Exception as exc:
         _warn(f"Portfolio return warning: {exc}")
     else:
         if portfolio_metric is not None:
             top_right_metrics.append(portfolio_metric)
     try:
-        top_right_metrics.extend(crypy_headline_metrics())
+        crypy_url = (
+            app_config.external_metrics.crypy_headline_url
+            if app_config.external_metrics.crypy_headline_enabled
+            else ""
+        )
+        top_right_metrics.extend(
+            crypy_headline_metrics(
+                url=crypy_url,
+                timeout=app_config.external_metrics.timeout_seconds,
+            )
+        )
     except Exception as exc:
         _warn(f"Crypy headline warning: {exc}")
 
@@ -214,9 +301,10 @@ def run_pipeline(
         height=render_height,
         visual_config=app_config.visual,
         chart_points=chart_points,
+        chart_window_days=chart_window_days,
         streak_days=score.streak_days,
         streak_pending=score.streak_pending,
-        expected_recent_points=score.expected_recent_points,
+        expected_recent_points=chart_target_points,
         today_points=today_points,
         gap_days=gap_days,
         last_run_details=last_run_details,

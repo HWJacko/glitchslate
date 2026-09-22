@@ -45,6 +45,10 @@ def _write_state(path: Path, last_update_id: int) -> None:
         + "\n",
         encoding="utf-8",
     )
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def _append_update(inbox_dir: Path, day_key: str, update: dict[str, Any]) -> None:
@@ -52,6 +56,10 @@ def _append_update(inbox_dir: Path, day_key: str, update: dict[str, Any]) -> Non
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(update, ensure_ascii=True, separators=(",", ":")))
         handle.write("\n")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 def cleanup_old_files(inbox_dir: Path, *, retention_days: int, today: date) -> int:
@@ -77,6 +85,10 @@ def archive_once(
     timezone_name: str | None = None,
 ) -> tuple[int, int]:
     inbox_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        inbox_dir.chmod(0o700)
+    except OSError:
+        pass
     state_path = inbox_dir / ".state.json"
     last_update_id = _read_state(state_path)
     offset = last_update_id + 1 if last_update_id is not None else None

@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from os_sync import set_wallpaper
+from os_sync import _escape_applescript_string, set_wallpaper
 from visual_engine import (
     _metric_value_color,
     calculate_glitch_factor,
@@ -154,6 +154,9 @@ class VisualAndOsTests(unittest.TestCase):
                 command = set_wallpaper(image, dry_run=True)
             self.assertEqual(command[0], "osascript")
             run.assert_not_called()
+
+    def test_applescript_path_escaping(self) -> None:
+        self.assertEqual(_escape_applescript_string('a\\b"c\nd'), 'a\\\\b\\"c\\nd')
 
 
 if __name__ == "__main__":

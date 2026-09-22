@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,7 @@ class DailyChartPoint:
     other_points: int
     total_points: int
     is_best: bool = False
+    bucket_points: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,12 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     db_path = get_db_path(path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # The database can contain raw Telegram messages and refreshed API tokens.
+    # Keep it private even when the user's umask is permissive.
+    try:
+        db_path.chmod(0o600)
+    except OSError:
+        pass
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -91,6 +98,61 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE activities ADD COLUMN points REAL NOT NULL DEFAULT 0")
     if "point_components" not in columns:
         conn.execute("ALTER TABLE activities ADD COLUMN point_components TEXT")
+    create_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'activities'"
+    ).fetchone()
+    if create_sql and "source IN ('telegram', 'strava')" in str(create_sql["sql"]):
+        _rebuild_activities_table(conn)
+
+
+def _rebuild_activities_table(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE activities RENAME TO activities_old")
+    conn.execute(
+        """
+        CREATE TABLE activities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL CHECK (source IN ('telegram', 'strava', 'writing', 'social')),
+            external_id TEXT NOT NULL,
+            timestamp DATETIME NOT NULL,
+            local_date TEXT NOT NULL,
+            activity_type TEXT,
+            duration_minutes INTEGER NOT NULL,
+            points REAL NOT NULL DEFAULT 0,
+            point_components TEXT,
+            intensity TEXT,
+            notes TEXT,
+            raw_payload TEXT,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source, external_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO activities (
+            id, source, external_id, timestamp, local_date, activity_type,
+            duration_minutes, points, point_components, intensity, notes,
+            raw_payload, created_at, updated_at
+        )
+        SELECT
+            id, source, external_id, timestamp, local_date, activity_type,
+            duration_minutes, points, point_components, intensity, notes,
+            raw_payload, created_at, updated_at
+        FROM activities_old
+        """
+    )
+    conn.execute("DROP TABLE activities_old")
+
+
+def _source_filter_sql(source_names: tuple[str, ...] | list[str] | None) -> tuple[str, tuple[str, ...]]:
+    if not source_names:
+        return "", ()
+    cleaned = tuple(str(source).strip() for source in source_names if str(source).strip())
+    if not cleaned:
+        return "", ()
+    placeholders = ", ".join("?" for _ in cleaned)
+    return f" AND source IN ({placeholders})", cleaned
 
 
 def _to_local_date(timestamp: datetime, tz: ZoneInfo) -> str:
@@ -251,34 +313,56 @@ def set_sync_state(conn: sqlite3.Connection, key: str, value: str | int) -> None
     conn.commit()
 
 
-def _sum_points_between(conn: sqlite3.Connection, start_day: date, end_day: date) -> float:
+def _sum_points_between(
+    conn: sqlite3.Connection,
+    start_day: date,
+    end_day: date,
+    *,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> float:
+    source_clause, source_params = _source_filter_sql(source_names)
     row = conn.execute(
-        """
+        f"""
         SELECT COALESCE(SUM(points), 0) AS total_points
         FROM activities
         WHERE local_date >= ? AND local_date <= ?
+        {source_clause}
         """,
-        (start_day.isoformat(), end_day.isoformat()),
+        (start_day.isoformat(), end_day.isoformat(), *source_params),
     ).fetchone()
     return float(row["total_points"])
 
 
-def _sum_minutes_between(conn: sqlite3.Connection, start_day: date, end_day: date) -> int:
+def _sum_minutes_between(
+    conn: sqlite3.Connection,
+    start_day: date,
+    end_day: date,
+    *,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> int:
+    source_clause, source_params = _source_filter_sql(source_names)
     row = conn.execute(
-        """
+        f"""
         SELECT COALESCE(SUM(duration_minutes), 0) AS total_minutes
         FROM activities
         WHERE local_date >= ? AND local_date <= ?
+        {source_clause}
         """,
-        (start_day.isoformat(), end_day.isoformat()),
+        (start_day.isoformat(), end_day.isoformat(), *source_params),
     ).fetchone()
     return int(row["total_minutes"])
 
 
-def _activity_count_for_day(conn: sqlite3.Connection, day: date) -> int:
+def _activity_count_for_day(
+    conn: sqlite3.Connection,
+    day: date,
+    *,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> int:
+    source_clause, source_params = _source_filter_sql(source_names)
     row = conn.execute(
-        "SELECT COUNT(*) AS activity_count FROM activities WHERE local_date = ?",
-        (day.isoformat(),),
+        f"SELECT COUNT(*) AS activity_count FROM activities WHERE local_date = ?{source_clause}",
+        (day.isoformat(), *source_params),
     ).fetchone()
     return int(row["activity_count"])
 
@@ -319,6 +403,19 @@ def daily_points_map(
     return {str(row["local_date"]): int(round(float(row["total_points"]))) for row in rows}
 
 
+def _bucket_for_activity(source: str, activity_type: str | None) -> str:
+    normalized_type = (activity_type or "").strip().lower()
+    if source == "strava" and normalized_type == "run":
+        return "run"
+    if source == "writing":
+        return normalized_type or "writing"
+    if source == "social":
+        return "social"
+    if source in {"telegram", "strava"}:
+        return "workout"
+    return "other"
+
+
 def daily_source_points(
     conn: sqlite3.Connection,
     *,
@@ -329,38 +426,52 @@ def daily_source_points(
         """
         SELECT
             local_date,
-            CASE
-                WHEN source = 'strava' AND LOWER(COALESCE(activity_type, '')) = 'run' THEN 'run'
-                ELSE 'other'
-            END AS bucket,
+            source,
+            activity_type,
             COALESCE(SUM(points), 0) AS total_points
         FROM activities
         WHERE local_date >= ? AND local_date <= ?
-        GROUP BY local_date, bucket
+        GROUP BY local_date, source, activity_type
         """,
         (start_day.isoformat(), end_day.isoformat()),
     ).fetchall()
     values: dict[str, dict[str, int]] = {}
     for row in rows:
         day = str(row["local_date"])
-        bucket = str(row["bucket"])
-        values.setdefault(day, {"run": 0, "other": 0})[bucket] = int(round(float(row["total_points"])))
+        bucket = _bucket_for_activity(str(row["source"]), row["activity_type"])
+        day_values = values.setdefault(day, {})
+        day_values[bucket] = day_values.get(bucket, 0) + int(round(float(row["total_points"])))
     return values
 
 
-def minutes_for_day(conn: sqlite3.Connection, day: date) -> int:
-    return _sum_minutes_between(conn, day, day)
+def minutes_for_day(
+    conn: sqlite3.Connection,
+    day: date,
+    *,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> int:
+    return _sum_minutes_between(conn, day, day, source_names=source_names)
 
 
-def points_for_day(conn: sqlite3.Connection, day: date) -> int:
-    return int(round(_sum_points_between(conn, day, day)))
+def points_for_day(
+    conn: sqlite3.Connection,
+    day: date,
+    *,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> int:
+    return int(round(_sum_points_between(conn, day, day, source_names=source_names)))
 
 
-def current_gap_days(conn: sqlite3.Connection, *, end_day: date) -> int:
+def current_gap_days(
+    conn: sqlite3.Connection,
+    *,
+    end_day: date,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> int:
     gap = 0
     current = end_day
     while True:
-        if points_for_day(conn, current) > 0:
+        if points_for_day(conn, current, source_names=source_names) > 0:
             return gap
         gap += 1
         current = current - timedelta(days=1)
@@ -449,10 +560,10 @@ def daily_chart_points(
     max_total = 0
     for offset in range(point_count):
         day = first_day + timedelta(days=offset)
-        values = by_day.get(day.isoformat(), {"run": 0, "other": 0})
+        values = by_day.get(day.isoformat(), {})
         run_points = values.get("run", 0)
-        other_points = values.get("other", 0)
-        total = run_points + other_points
+        other_points = values.get("workout", values.get("other", 0))
+        total = sum(values.values())
         max_total = max(max_total, total)
         points.append(
             DailyChartPoint(
@@ -460,6 +571,7 @@ def daily_chart_points(
                 run_points=run_points,
                 other_points=other_points,
                 total_points=total,
+                bucket_points=dict(values),
             )
         )
     if max_total <= 0:
@@ -471,6 +583,55 @@ def daily_chart_points(
             other_points=point.other_points,
             total_points=point.total_points,
             is_best=point.total_points == max_total,
+            bucket_points=dict(point.bucket_points),
+        )
+        for point in points
+    ]
+
+
+def rolling_chart_points(
+    conn: sqlite3.Connection,
+    *,
+    end_day: date,
+    point_count: int = 30,
+    window_days: int = 7,
+) -> list[DailyChartPoint]:
+    first_bar_day = end_day - timedelta(days=point_count - 1)
+    first_needed_day = first_bar_day - timedelta(days=window_days - 1)
+    by_day = daily_source_points(conn, start_day=first_needed_day, end_day=end_day)
+    points: list[DailyChartPoint] = []
+    max_total = 0
+    for offset in range(point_count):
+        bar_day = first_bar_day + timedelta(days=offset)
+        bucket_points: dict[str, int] = {}
+        for window_offset in range(window_days):
+            day = bar_day - timedelta(days=window_days - 1 - window_offset)
+            values = by_day.get(day.isoformat(), {})
+            for bucket, value in values.items():
+                bucket_points[bucket] = bucket_points.get(bucket, 0) + value
+        run_points = bucket_points.get("run", 0)
+        other_points = bucket_points.get("workout", bucket_points.get("other", 0))
+        total = sum(bucket_points.values())
+        max_total = max(max_total, total)
+        points.append(
+            DailyChartPoint(
+                day=bar_day.isoformat(),
+                run_points=run_points,
+                other_points=other_points,
+                total_points=total,
+                bucket_points=dict(bucket_points),
+            )
+        )
+    if max_total <= 0:
+        return points
+    return [
+        DailyChartPoint(
+            day=point.day,
+            run_points=point.run_points,
+            other_points=point.other_points,
+            total_points=point.total_points,
+            is_best=point.total_points == max_total,
+            bucket_points=dict(point.bucket_points),
         )
         for point in points
     ]
@@ -523,10 +684,11 @@ def calculate_daily_score(
     recent_start = local_today - timedelta(days=config.recent_window_days - 1)
     baseline_start = local_today - timedelta(days=config.baseline_window_days - 1)
 
-    today_points = _sum_points_between(conn, local_today, local_today)
-    baseline_points = _sum_points_between(conn, baseline_start, local_today)
-    today_minutes = _sum_minutes_between(conn, local_today, local_today)
-    baseline_minutes = _sum_minutes_between(conn, baseline_start, local_today)
+    included_sources = config.included_sources
+    today_points = _sum_points_between(conn, local_today, local_today, source_names=included_sources)
+    baseline_points = _sum_points_between(conn, baseline_start, local_today, source_names=included_sources)
+    today_minutes = _sum_minutes_between(conn, local_today, local_today, source_names=included_sources)
+    baseline_minutes = _sum_minutes_between(conn, baseline_start, local_today, source_names=included_sources)
     baseline_daily_points = baseline_points / config.baseline_window_days
     baseline_daily_minutes = baseline_minutes / config.baseline_window_days
     expected_today_points = max(
@@ -551,7 +713,7 @@ def calculate_daily_score(
         (today_key,),
     ).fetchone()
     previous_streak_days = int(previous["streak_days"]) if previous else 0
-    activity_count = _activity_count_for_day(conn, local_today)
+    activity_count = _activity_count_for_day(conn, local_today, source_names=included_sources)
     achieved_streak_days = previous_streak_days + 1 if activity_count > 0 else 0
     streak_pending = activity_count == 0 and previous_streak_days > 0
     display_streak_days = achieved_streak_days if activity_count > 0 else previous_streak_days + 1 if streak_pending else 0

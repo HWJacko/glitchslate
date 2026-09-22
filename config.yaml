@@ -10,17 +10,29 @@ visual:
   keep_archive_images: false
   archive_retention_hours: 48
 
+chart:
+  rolling_window_days: 3
+  history_days: 30
+
 scoring:
   recent_window_days: 5
   baseline_window_days: 30
   min_expected_5_day_minutes: 60
   min_expected_5_day_points: 1500
+  included_sources: ["telegram", "strava"]
 
 
 sentient_log:
-  enabled: true
+  # Sending score/streak data to an LLM is opt-in.
+  enabled: false
   model: gpt-4o-mini
   max_chars: 90
+
+parser:
+  provider: auto
+  openai_model: gpt-4o-mini
+  gemini_model: gemini-2.0-flash
+  max_message_chars: 4000
 
 telemetry:
   show_systemd_box: true
@@ -35,3 +47,35 @@ telegram_archive:
   enabled: false
   blank_lookback_days: 28
   remote_dir: glitchslate-telegram-inbox
+  timeout_seconds: 30
+
+telegram:
+  enabled: true
+  direct_sync: true
+  archive_enabled: false
+  request_timeout_seconds: 10
+
+strava:
+  # Enable only after adding Strava credentials to .env.
+  enabled: false
+  lookback_days: 2
+  request_timeout_seconds: 30
+
+writing:
+  enabled: false
+  projects: []
+
+social:
+  enabled: false
+  bluesky_rss_url: https://bsky.app/profile/your-handle/rss
+  reminder_after_days: 4
+  post_points: 1000
+  timeout_seconds: 10
+
+external_metrics:
+  # These integrations are disabled until you provide your own paths/URLs.
+  portfolio_return_enabled: false
+  portfolio_return_path: ""
+  crypy_headline_enabled: false
+  crypy_headline_url: ""
+  timeout_seconds: 20

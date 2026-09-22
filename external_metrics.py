@@ -11,11 +11,9 @@ from typing import Any
 import requests
 
 
-DEFAULT_PORTFOLIO_RETURN_PATH = Path(
-    "/Users/hedleyjackson/src/projects/smoke-tree/.smoke-tree-checker/portfolio-return.json"
-)
+DEFAULT_PORTFOLIO_RETURN_PATH: Path | None = None
 DEFAULT_MAX_AGE_SECONDS = 5400
-CRYPY_HEADLINE_URL = "https://hwjacko2.eu.pythonanywhere.com/api/headline"
+CRYPY_HEADLINE_URL = ""
 CRYPY_HEADLINE_TIMEOUT_SECONDS = 20
 
 
@@ -84,7 +82,7 @@ def _polarity(value: Decimal) -> str:
     return "neutral"
 
 
-def load_portfolio_return_snapshot(path: str | Path = DEFAULT_PORTFOLIO_RETURN_PATH) -> PortfolioReturnSnapshot:
+def load_portfolio_return_snapshot(path: str | Path) -> PortfolioReturnSnapshot:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
 
     return PortfolioReturnSnapshot(
@@ -97,11 +95,13 @@ def load_portfolio_return_snapshot(path: str | Path = DEFAULT_PORTFOLIO_RETURN_P
 
 
 def portfolio_return_metric(
-    path: str | Path = DEFAULT_PORTFOLIO_RETURN_PATH,
+    path: str | Path | None = DEFAULT_PORTFOLIO_RETURN_PATH,
     *,
     now: datetime | None = None,
 ) -> ExternalMetric | None:
-    source = Path(path)
+    if not path:
+        return None
+    source = Path(path).expanduser()
     if not source.exists():
         return None
 
@@ -122,6 +122,8 @@ def load_crypy_headline(
     url: str = CRYPY_HEADLINE_URL,
     timeout: int = CRYPY_HEADLINE_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
+    if not url:
+        return None
     user = os.getenv("CRYPY_HEADLINE_USER")
     password = os.getenv("CRYPY_HEADLINE_PASS")
     if not user or not password:

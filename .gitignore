@@ -13,3 +13,6 @@ logs/*
 !logs/.gitkeep
 test_output/*
 !test_output/.gitkeep
+*.log
+*.jsonl
+.state.json

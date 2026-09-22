@@ -28,6 +28,7 @@ def refresh_token(
     client_id: str,
     client_secret: str,
     refresh_token_value: str,
+    timeout: int = 30,
     session: Any | None = None,
 ) -> str:
     http = session or _requests_session()
@@ -39,7 +40,7 @@ def refresh_token(
             "refresh_token": refresh_token_value,
             "grant_type": "refresh_token",
         },
-        timeout=30,
+        timeout=timeout,
     )
     response.raise_for_status()
     payload = response.json()
@@ -56,6 +57,7 @@ def get_access_token(
     client_id: str,
     client_secret: str,
     env_refresh_token: str,
+    timeout: int = 30,
     session: Any | None = None,
     now: datetime | None = None,
 ) -> str:
@@ -76,6 +78,7 @@ def get_access_token(
             client_id=client_id,
             client_secret=client_secret,
             refresh_token_value=env_refresh_token,
+            timeout=timeout,
             session=session,
         )
         set_sync_state(conn, "strava_config_refresh_token", env_refresh_token)
@@ -91,6 +94,7 @@ def get_access_token(
         client_id=client_id,
         client_secret=client_secret,
         refresh_token_value=refresh_token_value,
+        timeout=timeout,
         session=session,
     )
     set_sync_state(conn, "strava_config_refresh_token", env_refresh_token)
@@ -101,6 +105,7 @@ def fetch_activities(
     access_token: str,
     *,
     after: datetime,
+    timeout: int = 30,
     session: Any | None = None,
 ) -> list[dict[str, Any]]:
     http = session or _requests_session()
@@ -108,7 +113,7 @@ def fetch_activities(
         STRAVA_ACTIVITIES_URL,
         headers={"Authorization": f"Bearer {access_token}"},
         params={"after": int(after.timestamp()), "per_page": 100},
-        timeout=30,
+        timeout=timeout,
     )
     response.raise_for_status()
     return list(response.json())
@@ -160,22 +165,25 @@ def sync_strava(
     dry_run: bool = False,
     timezone_name: str | None = None,
     now: datetime | None = None,
+    lookback_days: int = 2,
+    request_timeout: int = 30,
 ) -> int:
     local_tz = get_timezone(timezone_name)
     current = now or datetime.now(timezone.utc)
-    after = current.astimezone(local_tz).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=2)
+    after = current.astimezone(local_tz).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=lookback_days)
 
     token = get_access_token(
         conn,
         client_id=client_id,
         client_secret=client_secret,
         env_refresh_token=refresh_token_value,
+        timeout=request_timeout,
         session=session,
         now=current,
     )
     after_utc = after.astimezone(timezone.utc)
     try:
-        activities = fetch_activities(token, after=after_utc, session=session)
+        activities = fetch_activities(token, after=after_utc, timeout=request_timeout, session=session)
     except Exception as exc:
         if not _is_unauthorized_error(exc):
             raise
@@ -184,10 +192,11 @@ def sync_strava(
             client_id=client_id,
             client_secret=client_secret,
             refresh_token_value=get_sync_state(conn, "strava_refresh_token") or refresh_token_value,
+            timeout=request_timeout,
             session=session,
         )
         try:
-            activities = fetch_activities(token, after=after_utc, session=session)
+            activities = fetch_activities(token, after=after_utc, timeout=request_timeout, session=session)
         except Exception as retry_exc:
             permission_message = _missing_activity_read_message(retry_exc)
             if permission_message:

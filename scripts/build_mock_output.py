@@ -18,13 +18,13 @@ from db import (
     calculate_daily_score,
     connect,
     current_gap_days,
-    daily_chart_points,
     daily_minutes_map,
     daily_points_map,
     get_last_run_details,
     init_db,
     minutes_for_day,
     points_for_day,
+    rolling_chart_points,
     upsert_activity,
 )
 from sentient_log import fallback_sentient_log
@@ -163,11 +163,14 @@ def build_mock_output(
         scoring_config=app_config.scoring,
         persist=True,
     )
-    chart_points = daily_chart_points(
+    chart_window_days = app_config.chart.rolling_window_days
+    chart_points = rolling_chart_points(
         conn,
         end_day=end_day,
         point_count=app_config.scoring.baseline_window_days,
+        window_days=chart_window_days,
     )
+    chart_target_points = score.expected_recent_points * chart_window_days
     today_minutes = minutes_for_day(conn, end_day)
     today_points = points_for_day(conn, end_day)
     gap_days = current_gap_days(conn, end_day=end_day)
@@ -199,9 +202,10 @@ def build_mock_output(
         height=render_height,
         visual_config=app_config.visual,
         chart_points=chart_points,
+        chart_window_days=chart_window_days,
         streak_days=score.streak_days,
         streak_pending=score.streak_pending,
-        expected_recent_points=score.expected_recent_points,
+        expected_recent_points=chart_target_points,
         today_points=today_points,
         gap_days=gap_days,
         last_run_details=last_run_details,
@@ -234,6 +238,7 @@ def build_mock_output(
             "other_points": point.other_points,
             "total_points": point.total_points,
             "is_best": point.is_best,
+            "bucket_points": point.bucket_points,
         }
         for point in chart_points
     ]
@@ -273,7 +278,8 @@ def build_mock_output(
         "source_points": source_points,
         "daily_minutes": daily_minutes,
         "daily_points": daily_points,
-        "daily_chart_points": serialized_chart_points,
+        "chart_window_days": chart_window_days,
+        "chart_points": serialized_chart_points,
         "diagnostics": {
             "backend": render_result.diagnostics.backend,
             "bar_count": render_result.diagnostics.bar_count,

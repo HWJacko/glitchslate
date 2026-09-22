@@ -9,6 +9,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
+def _escape_applescript_string(value: str) -> str:
+    """Escape a filesystem path before interpolating it into AppleScript."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+
+
 def set_wallpaper(image_path: str | Path, *, dry_run: bool = False) -> list[str]:
     path = Path(image_path).expanduser().resolve()
     if not path.exists():
@@ -16,10 +26,11 @@ def set_wallpaper(image_path: str | Path, *, dry_run: bool = False) -> list[str]
 
     system = platform.system()
     if system == "Darwin":
+        escaped_path = _escape_applescript_string(str(path))
         command = [
             "osascript",
             "-e",
-            f'tell application "System Events" to tell every desktop to set picture to "{path}"',
+            f'tell application "System Events" to tell every desktop to set picture to "{escaped_path}"',
         ]
     elif system == "Linux":
         uri = path.as_uri()

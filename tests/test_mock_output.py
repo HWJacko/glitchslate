@@ -40,6 +40,8 @@ class MockOutputTests(unittest.TestCase):
             self.assertEqual(summary["date"], "2026-07-13")
             self.assertEqual(summary["source_counts"]["telegram"], 15)
             self.assertEqual(summary["source_counts"]["strava"], 7)
+            self.assertEqual(summary["chart_window_days"], 3)
+            self.assertEqual(len(summary["chart_points"]), 30)
             self.assertEqual(json.loads(summary_path.read_text())["score"], summary["score"])
 
 

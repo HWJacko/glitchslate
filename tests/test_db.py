@@ -18,6 +18,7 @@ from db import (
     init_db,
     minutes_for_day,
     points_for_day,
+    rolling_chart_points,
     rolling_window_points,
     rolling_window_minutes,
     set_cached_sentient_log,
@@ -57,6 +58,60 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("activities", names)
         self.assertIn("daily_state", names)
         self.assertIn("sync_state", names)
+
+    def test_init_migrates_old_activity_source_constraint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            conn = connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE activities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL CHECK (source IN ('telegram', 'strava')),
+                    external_id TEXT NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    local_date TEXT NOT NULL,
+                    activity_type TEXT,
+                    duration_minutes INTEGER NOT NULL,
+                    points REAL NOT NULL DEFAULT 0,
+                    point_components TEXT,
+                    intensity TEXT,
+                    notes TEXT,
+                    raw_payload TEXT,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source, external_id)
+                );
+                CREATE TABLE daily_state (
+                    date TEXT PRIMARY KEY,
+                    score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
+                    streak_days INTEGER NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE sync_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            )
+
+            init_db(conn)
+            upsert_activity(
+                conn,
+                Activity(
+                    source="writing",
+                    external_id="main:2026-07-13",
+                    timestamp=datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc),
+                    activity_type="main_project",
+                    duration_minutes=0,
+                    points=100,
+                ),
+            )
+
+            self.assertEqual(conn.execute("SELECT source FROM activities").fetchone()["source"], "writing")
+            conn.close()
 
     def test_activity_upsert_is_idempotent_for_source_and_external_id(self) -> None:
         activity = Activity(
@@ -199,7 +254,109 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(points[0].is_best)
         self.assertEqual(points[1].run_points, 0)
         self.assertEqual(points[1].other_points, 600)
+        self.assertEqual(points[1].bucket_points, {"workout": 600})
         self.assertFalse(points[1].is_best)
+
+    def test_daily_score_ignores_non_fitness_sources(self) -> None:
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="writing",
+                external_id="shorts:2026-07-13",
+                timestamp=datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc),
+                activity_type="short_story",
+                duration_minutes=0,
+                points=5000,
+            ),
+        )
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="social",
+                external_id="at://example/post",
+                timestamp=datetime(2026, 7, 13, 9, 30, tzinfo=timezone.utc),
+                activity_type="bluesky_post",
+                duration_minutes=0,
+                points=1000,
+            ),
+        )
+
+        score = calculate_daily_score(self.conn, today=date(2026, 7, 13))
+
+        self.assertEqual(score.score, 0)
+        self.assertEqual(points_for_day(self.conn, date(2026, 7, 13), source_names=("telegram", "strava")), 0)
+        self.assertEqual(points_for_day(self.conn, date(2026, 7, 13)), 6000)
+
+    def test_rolling_chart_points_split_seven_day_run_and_other_totals(self) -> None:
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="strava",
+                external_id="run-1",
+                timestamp=datetime(2026, 7, 7, 9, 0, tzinfo=timezone.utc),
+                activity_type="run",
+                duration_minutes=20,
+                points=1000,
+            ),
+        )
+        self.add_activity("other-1", 10, 30)
+        self.add_activity("other-2", 13, 20)
+
+        points = rolling_chart_points(self.conn, end_day=date(2026, 7, 13), point_count=2, window_days=7)
+
+        self.assertEqual([point.day for point in points], ["2026-07-12", "2026-07-13"])
+        self.assertEqual(points[0].run_points, 1000)
+        self.assertEqual(points[0].other_points, 900)
+        self.assertEqual(points[0].total_points, 1900)
+        self.assertFalse(points[0].is_best)
+        self.assertEqual(points[1].run_points, 1000)
+        self.assertEqual(points[1].other_points, 1500)
+        self.assertEqual(points[1].total_points, 2500)
+        self.assertTrue(points[1].is_best)
+
+    def test_rolling_chart_points_include_writing_and_social_buckets(self) -> None:
+        self.add_activity("workout", 13, 20)
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="writing",
+                external_id="shorts:2026-07-13",
+                timestamp=datetime(2026, 7, 13, 9, 0, tzinfo=timezone.utc),
+                activity_type="short_story",
+                duration_minutes=0,
+                points=800,
+            ),
+        )
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="writing",
+                external_id="main:2026-07-13",
+                timestamp=datetime(2026, 7, 13, 10, 0, tzinfo=timezone.utc),
+                activity_type="main_project",
+                duration_minutes=0,
+                points=1200,
+            ),
+        )
+        upsert_activity(
+            self.conn,
+            Activity(
+                source="social",
+                external_id="at://example/post",
+                timestamp=datetime(2026, 7, 13, 11, 0, tzinfo=timezone.utc),
+                activity_type="bluesky_post",
+                duration_minutes=0,
+                points=1000,
+            ),
+        )
+
+        points = rolling_chart_points(self.conn, end_day=date(2026, 7, 13), point_count=1, window_days=7)
+
+        self.assertEqual(
+            points[0].bucket_points,
+            {"workout": 600, "short_story": 800, "main_project": 1200, "social": 1000},
+        )
+        self.assertEqual(points[0].total_points, 3600)
 
     def test_last_run_details_from_strava_payload(self) -> None:
         upsert_activity(

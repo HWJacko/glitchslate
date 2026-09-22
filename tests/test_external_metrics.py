@@ -75,10 +75,10 @@ class ExternalMetricTests(unittest.TestCase):
             {"CRYPY_HEADLINE_USER": "user", "CRYPY_HEADLINE_PASS": "pass"},
             clear=True,
         ), mock.patch("external_metrics.requests.get", return_value=Response()) as get:
-            metrics = crypy_headline_metrics()
+            metrics = crypy_headline_metrics(url="https://example.test/api/headline")
 
         get.assert_called_once_with(
-            "https://hwjacko2.eu.pythonanywhere.com/api/headline",
+            "https://example.test/api/headline",
             auth=("user", "pass"),
             timeout=20,
         )

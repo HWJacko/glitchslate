@@ -106,7 +106,7 @@ def fetch_updates(
     return list(data.get("result", []))
 
 
-def parse_workout_with_gemini(text: str) -> ParsedWorkout:
+def parse_workout_with_gemini(text: str, *, model: str | None = None) -> ParsedWorkout:
     try:
         from google import genai
     except ImportError as exc:
@@ -119,7 +119,7 @@ def parse_workout_with_gemini(text: str) -> ParsedWorkout:
     client = genai.Client(api_key=api_key)
     prompt = _workout_prompt(text)
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model=model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         contents=prompt,
         config={
             "response_mime_type": "application/json",
@@ -223,13 +223,24 @@ def parse_workout_with_openai(
     return json.loads(output_text)
 
 
-def get_workout_parser(provider: str | None = None) -> Parser:
-    selected = (provider or os.getenv("WORKOUT_PARSER_PROVIDER") or "").strip().lower()
-    if not selected:
+def get_workout_parser(
+    provider: str | None = None,
+    *,
+    openai_model: str | None = None,
+    gemini_model: str | None = None,
+) -> Parser:
+    selected = (provider or "").strip().lower()
+    if not selected or selected == "auto":
+        selected = os.getenv("WORKOUT_PARSER_PROVIDER", "").strip().lower()
+    if not selected or selected == "auto":
         selected = "openai" if os.getenv("OPENAI_API_KEY") else "gemini"
     if selected == "openai":
+        if openai_model:
+            return lambda text: parse_workout_with_openai(text, model=openai_model)
         return parse_workout_with_openai
     if selected == "gemini":
+        if gemini_model:
+            return lambda text: parse_workout_with_gemini(text, model=gemini_model)
         return parse_workout_with_gemini
     raise ValueError("WORKOUT_PARSER_PROVIDER must be 'openai' or 'gemini'")
 
@@ -287,6 +298,7 @@ def sync_telegram_updates(
     timezone_name: str | None = None,
     allowed_local_dates: set[str] | None = None,
     skip_existing: bool = False,
+    max_message_chars: int = 4_000,
 ) -> int:
     inserted = 0
     tz = get_timezone(timezone_name)
@@ -323,6 +335,9 @@ def sync_telegram_updates(
             continue
 
         workout_text, submitted_local_date = _extract_historical_local_date(text)
+        if len(workout_text) > max_message_chars:
+            print("Ignoring Telegram message over parser size limit", file=sys.stderr)
+            continue
 
         parsed = parse_known_workout(workout_text)
         if parsed is None:
@@ -370,10 +385,12 @@ def sync_telegram(
     request_get: Callable[[str, dict[str, Any], int], dict[str, Any]] = _request_get,
     dry_run: bool = False,
     timezone_name: str | None = None,
+    request_timeout: int = 10,
+    max_message_chars: int = 4_000,
 ) -> int:
     last_update = get_sync_state(conn, "telegram_last_update_id")
     offset = int(last_update) + 1 if last_update is not None else None
-    updates = fetch_updates(token, offset=offset, request_get=request_get)
+    updates = fetch_updates(token, offset=offset, timeout=request_timeout, request_get=request_get)
     highest_update_id: int | None = None
 
     for update in updates:
@@ -388,6 +405,7 @@ def sync_telegram(
         parser=parser,
         dry_run=dry_run,
         timezone_name=timezone_name,
+        max_message_chars=max_message_chars,
     )
 
     if highest_update_id is not None and not dry_run:

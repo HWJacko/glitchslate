@@ -14,6 +14,15 @@ from config import VisualConfig
 
 WIDTH = 3840
 HEIGHT = 2160
+BUCKET_ORDER = ["run", "workout", "short_story", "main_project", "social", "other"]
+BUCKET_LABELS = {
+    "run": "RUN",
+    "workout": "WORKOUT",
+    "short_story": "SHORT",
+    "main_project": "MAIN",
+    "social": "SOCIAL",
+    "other": "OTHER",
+}
 
 
 @dataclass(frozen=True)
@@ -265,7 +274,17 @@ def _field(point: Any, name: str, default: Any = 0) -> Any:
 
 def _coerce_chart_points(points: list[Any], day: str) -> list[dict[str, Any]]:
     if not points:
-        return [{"day": day, "run_points": 0, "other_points": 0, "total_points": 0, "is_best": False} for _ in range(30)]
+        return [
+            {
+                "day": day,
+                "run_points": 0,
+                "other_points": 0,
+                "total_points": 0,
+                "is_best": False,
+                "bucket_points": {},
+            }
+            for _ in range(30)
+        ]
     coerced: list[dict[str, Any]] = []
     for point in points:
         if isinstance(point, tuple) and len(point) == 2:
@@ -273,12 +292,28 @@ def _coerce_chart_points(points: list[Any], day: str) -> list[dict[str, Any]]:
             run_points = 0
             other_points = int(total)
             is_best = False
+            bucket_points = {"workout": other_points} if other_points else {}
         else:
             point_day = str(_field(point, "day", day))
             run_points = int(_field(point, "run_points", 0))
             other_points = int(_field(point, "other_points", 0))
             total = int(_field(point, "total_points", run_points + other_points))
             is_best = bool(_field(point, "is_best", False))
+            raw_buckets = _field(point, "bucket_points", None)
+            if isinstance(raw_buckets, dict):
+                bucket_points = {
+                    str(bucket): int(value)
+                    for bucket, value in raw_buckets.items()
+                    if int(value) > 0
+                }
+            else:
+                bucket_points = {}
+                if run_points:
+                    bucket_points["run"] = run_points
+                if other_points:
+                    bucket_points["workout"] = other_points
+            if bucket_points:
+                total = sum(bucket_points.values())
         coerced.append(
             {
                 "day": str(point_day),
@@ -286,6 +321,7 @@ def _coerce_chart_points(points: list[Any], day: str) -> list[dict[str, Any]]:
                 "other_points": other_points,
                 "total_points": int(total),
                 "is_best": is_best,
+                "bucket_points": bucket_points,
             }
         )
     return coerced
@@ -329,6 +365,16 @@ def _metric_value_color(metric: dict[str, Any], *, positive, negative, neutral):
     return neutral
 
 
+def _ordered_bucket_items(bucket_points: dict[str, int]) -> list[tuple[str, int]]:
+    ordered = [(bucket, bucket_points[bucket]) for bucket in BUCKET_ORDER if bucket_points.get(bucket, 0) > 0]
+    ordered.extend(
+        (bucket, value)
+        for bucket, value in sorted(bucket_points.items())
+        if bucket not in BUCKET_ORDER and value > 0
+    )
+    return ordered
+
+
 def _draw_top_right_metrics(
     draw,
     *,
@@ -351,7 +397,7 @@ def _draw_top_right_metrics(
     if not metric_rows:
         return
 
-    entries = metric_rows[:4]
+    entries = metric_rows[:6]
     grid_top = top_edge + int(height * 0.035)
     col_gap = max(10, int(width * 0.01))
     row_gap = max(8, int(height * 0.012))
@@ -385,7 +431,8 @@ def _draw_top_right_metrics(
     cell_width = max(1, (panel_width - col_gap) // 2)
     panel_left = right_edge - panel_width
     cell_height = max(value_height + detail_height + cell_padding * 3, int(height * 0.056))
-    total_height = cell_height * 2 + row_gap
+    row_count = (len(entries) + 1) // 2
+    total_height = cell_height * row_count + row_gap * max(0, row_count - 1)
     grid_top = min(grid_top, max(top_edge + int(height * 0.03), int(height - total_height - int(height * 0.12))))
 
     for index, metric in enumerate(entries):
@@ -419,6 +466,7 @@ def render_wallpaper(
     seed: int | None = None,
     visual_config: VisualConfig | None = None,
     chart_points: list[Any] | None = None,
+    chart_window_days: int = 3,
     streak_days: int = 0,
     streak_pending: bool = False,
     expected_recent_points: float = 1500.0,
@@ -465,6 +513,14 @@ def render_wallpaper(
         run_color = _hex_to_rgb(config.active_gradient[0])
         other_color = _hex_to_rgb(config.active_gradient[1])
         best_color = (245, 208, 66)
+        bucket_colors = {
+            "run": run_color,
+            "workout": other_color,
+            "short_story": (251, 191, 36),
+            "main_project": (244, 114, 182),
+            "social": positive,
+            "other": muted,
+        }
 
         image = Image.new("RGBA", (width, height), (*bg, 255))
         draw = ImageDraw.Draw(image)
@@ -496,6 +552,7 @@ def render_wallpaper(
             run_points = int(point["run_points"])
             other_points = int(point["other_points"])
             point_value = int(point["total_points"])
+            bucket_points = dict(point.get("bucket_points") or {})
             center_x = chart_left + (index + 0.5) * slot
             x0 = int(center_x - bar_width / 2)
             x1 = int(center_x + bar_width / 2)
@@ -506,14 +563,21 @@ def render_wallpaper(
                 ratio = min(1.0, point_value / bar_scale)
                 fill_height = max(24, int(chart_height * ratio))
                 y0 = chart_bottom - fill_height
-                run_height = int(fill_height * (run_points / point_value)) if point_value else 0
-                other_height = fill_height - run_height
-                if other_height > 0:
-                    _draw_segment(draw, (x0, chart_bottom - other_height, x1, chart_bottom), other_color, radius=radius if run_height <= 0 else 0)
-                if run_height > 0:
-                    run_y0 = y0
-                    run_y1 = chart_bottom - other_height
-                    _draw_segment(draw, (x0, run_y0, x1, run_y1), run_color, radius=radius if other_height <= 0 else 0)
+                if not bucket_points:
+                    bucket_points = {"run": run_points, "workout": other_points}
+                segment_bottom = chart_bottom
+                bucket_items = _ordered_bucket_items(bucket_points)
+                for segment_index, (bucket, value) in enumerate(bucket_items):
+                    if value <= 0:
+                        continue
+                    if segment_index == len(bucket_items) - 1:
+                        segment_top = y0
+                    else:
+                        segment_height = max(1, int(round(fill_height * (value / point_value))))
+                        segment_top = max(y0, segment_bottom - segment_height)
+                    fill = bucket_colors.get(bucket, text)
+                    _draw_segment(draw, (x0, segment_top, x1, segment_bottom), fill)
+                    segment_bottom = segment_top
                 if bool(point["is_best"]):
                     _rounded_rectangle(draw, (x0 - 2, y0 - 2, x1 + 2, chart_bottom + 2), radius=radius + 2, fill=None, outline=best_color, width=max(1, width // 960))
             if index in label_every and point_value > 0:
@@ -536,7 +600,7 @@ def render_wallpaper(
             f"CURRENT SCORE : [ {score:3d} / 100  ]",
             f"ACTIVE STREAK : [ {streak_days:3d} DAYS{'*' if streak_pending else ' '} ]",
             f"TODAY VOLUME  : [ {_format_points(today_points):>8} ]",
-            f"LATEST DAY    : [ {_format_points(latest):>8} ]",
+            f"LATEST {chart_window_days}D     : [ {_format_points(latest):>8} ]",
             f"SYSTEM STATUS : [ {status:<9} ]",
         ]
         for offset, line in enumerate(lines):
@@ -559,7 +623,17 @@ def render_wallpaper(
                 small_font=small_font,
             )
 
-        footer = f"DAILY TOTALS // TARGET {int(round(expected_recent_points))}pt/DAY // RUN + OTHER // WINDOW END {day}"
+        active_bucket_names = [
+            BUCKET_LABELS.get(bucket, bucket.upper())
+            for bucket in BUCKET_ORDER
+            if any(int(point.get("bucket_points", {}).get(bucket, 0)) > 0 for point in points)
+        ]
+        bucket_label = " + ".join(active_bucket_names) if active_bucket_names else "RUN + WORKOUT"
+        footer = (
+            f"{chart_window_days}-DAY ROLLING TOTALS // "
+            f"TARGET {int(round(expected_recent_points))}pt/{chart_window_days}D // "
+            f"{bucket_label} // WINDOW END {day}"
+        )
         draw.text((chart_left, int(height * 0.80)), footer, fill=muted, font=small_font)
 
         if last_run_details is not None:

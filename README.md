@@ -32,9 +32,11 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 - Optional Hetzner Telegram archive fallback for laptop sleep/backlog gaps.
 - LLM workout parsing via OpenAI by default, with Gemini support as an optional parser provider.
 - Optional Strava run ingestion.
+- Optional Scrivener-export word-count ingestion from stacks of `.txt` files.
+- Optional Bluesky RSS ingestion for social posting cadence.
 - Local SQLite persistence with idempotent activity inserts.
 - Daily consistency score based on today's workout points against a 30-day baseline.
-- Procedural wallpaper rendering with a 30-bar daily activity chart.
+- Procedural wallpaper rendering with a 30-bar 3-day rolling chart across workout, writing, and social buckets.
 - System status labels: `STABLE`, `DRIFTING`, `AT RISK`, `CRITICAL`.
 - Optional OpenAI-generated sentient status log rendered on the wallpaper.
 - Pseudo-systemd telemetry box based on today's workout volume and inactivity gap.
@@ -47,7 +49,7 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 
 The main pipeline is `main.py`:
 
-1. Load `.env` and `config.yaml`.
+1. Load `.env` and `config.yaml` from the repository directory.
 2. Poll Telegram for new messages.
 3. Parse workout-like messages into structured activity records.
 4. Optionally sync Strava runs.
@@ -74,14 +76,16 @@ The persisted score remains the raw activity score. For wallpaper rendering and 
 
 For Strava runs, `running_value` is derived from Strava fields already stored in `raw_payload`: `moving_time`, `distance`, `average_speed`, `total_elevation_gain`, and `sport_type`. Pace and elevation adjust a base running value, while minutes remain stored as context.
 
-The chart shows 30 daily bars. Each bar is an actual local calendar day, stacked by run points and other workout points. The latest populated day is labeled, and the best day in the visible window is highlighted.
+The chart shows 30 rolling bars. Each bar is the configured rolling point total ending on that local calendar day (`chart.rolling_window_days`, currently 3), stacked by source bucket. Fitness scoring is source-filtered by `scoring.included_sources`, so writing and social posts can appear in the chart without inflating the workout score.
+
+Writing projects are captured as positive word deltas from exported Scrivener `.txt` stacks. Glitchslate stores a weekly Monday baseline for each project and a daily activity row for the words added that day. Bluesky posts are captured from the public RSS feed as `social` activity rows, and the external signals panel shows a reminder when the latest post is older than the configured threshold.
 
 ## Requirements
 
 - macOS for automatic wallpaper application and `launchd` scheduling.
 - Python 3.11+ recommended.
 - A Telegram bot token and your Telegram user id for chat ingestion.
-- An OpenAI API key for the default workout parser and sentient log.
+- An OpenAI API key for the default workout parser; the optional sentient log uses it too.
 - Optional Strava API credentials for run sync.
 - Optional Gemini API key if you choose `WORKOUT_PARSER_PROVIDER=gemini`.
 
@@ -119,7 +123,46 @@ LOCAL_TIMEZONE=Europe/London
 GLITCHSLATE_DB_PATH=glitchslate.db
 ```
 
-Secrets belong in `.env`. Non-secret rendering and scoring preferences live in `config.yaml`.
+Secrets belong in `.env`. Non-secret rendering, scoring, writing, and social preferences live in `config.yaml`.
+The checked-in configuration keeps outbound AI, Strava, social, and external-metric integrations opt-in. Copy the example values and replace placeholders with your own paths and account identifiers.
+
+Example writing/social config:
+
+```yaml
+scoring:
+  included_sources: ["telegram", "strava"]
+
+writing:
+  enabled: true
+  projects:
+    - id: shorts
+      label: SHORT STORIES
+      path: ~/Documents/Shorts/Draft
+      activity_type: short_story
+      weekly_goal_words: 5000
+    - id: main
+      label: MAIN PROJECT
+      path: ~/Documents/MainProject/Draft
+      activity_type: main_project
+      weekly_goal_words: 10000
+
+social:
+  enabled: true
+  bluesky_rss_url: https://bsky.app/profile/your-handle/rss
+  reminder_after_days: 4
+  post_points: 1000
+
+strava:
+  enabled: true
+  lookback_days: 2
+  request_timeout_seconds: 30
+
+external_metrics:
+  portfolio_return_enabled: true
+  portfolio_return_path: ~/path/to/portfolio-return.json
+  crypy_headline_enabled: false
+  crypy_headline_url: https://example.invalid/api/headline
+```
 
 ## Running Manually
 
@@ -179,7 +222,7 @@ The output root contains:
 ```text
 mock_glitchslate.db      SQLite database with Telegram-like and Strava-like mock activities
 assets/                  Rendered mock wallpapers
-summary.json             Score, source totals, daily chart points, diagnostics, and rendered paths
+summary.json             Score, source totals, chart points, diagnostics, and rendered paths
 ```
 
 The mock output is ignored by Git. It is intended for screenshots, renderer checks, documentation, and testing the full visual pipeline with realistic data while keeping real personal activity data local and private.
@@ -279,11 +322,11 @@ WORKOUT_PARSER_PROVIDER=gemini
 GEMINI_API_KEY=...
 ```
 
-The sentient status log currently uses OpenAI. It is skipped during `--dry-run`, generated during normal and `--no-apply` runs, and cached in SQLite by date, score, streak, and today's points.
+The sentient status log is disabled in the checked-in config because it sends score/streak data to OpenAI. Enable `sentient_log.enabled` explicitly if you want it; it is skipped during `--dry-run`, generated during normal and `--no-apply` runs, and cached in SQLite by date, score, streak, and today's points.
 
 ## Strava Setup
 
-Strava sync is optional. If any Strava credential is missing, the pipeline skips Strava and continues.
+Strava sync is optional and disabled by default. Set `strava.enabled: true` in `config.yaml`; if any Strava credential is missing, the pipeline skips Strava and continues.
 
 Required values:
 
@@ -377,17 +420,19 @@ The repository is intended to be safe to publish with the included ignore rules:
 - LaunchAgent logs are ignored.
 - Local mock output is ignored.
 - Python cache files are ignored.
+- The checked-in config contains no personal filesystem paths or account identifiers.
+- External integrations are disabled by default unless configured explicitly.
 
 Before publishing, run:
 
 ```bash
 git status --short
-rg -n "(api[_-]?key|token|secret|password|bearer|sk-[A-Za-z0-9])" -g '!*env*' -g '!assets/*.png' -g '!*.db' -g '!*.sqlite' -g '!*.sqlite3'
+git ls-files | xargs rg -n -I "(api[_-]?key|token|secret|password|bearer|sk-[A-Za-z0-9])"
 python3 -m unittest
 python3 scripts/build_mock_output.py --width 640 --height 360
 ```
 
-The search will still show expected environment variable names and test placeholders; investigate anything that looks like a real credential.
+The search will still show expected environment variable names and test placeholders; investigate anything that looks like a real credential. Run a secret scanner against the full Git history before publishing if this repository has ever been shared privately. Keep `.env` readable only by your user (`chmod 600 .env`) and rotate any credential that was ever committed, pasted into an issue, or included in a log.
 
 ## Testing
 
@@ -443,4 +488,4 @@ Reinstall the agent:
 
 ## Notes
 
-Glitchslate is local-first, but it can call third-party APIs depending on enabled integrations: Telegram, OpenAI, Gemini, and Strava. Activity data, parser payloads, sync offsets, and generated status text are stored in the local SQLite database.
+Glitchslate is local-first, but it can call third-party APIs depending on enabled integrations: Telegram, OpenAI, Gemini, Bluesky, and Strava. Activity data, parser payloads, sync offsets, and generated status text are stored in the local SQLite database. The parser limits Telegram message size before sending it to an LLM, and external integrations are disabled unless enabled in `config.yaml`.

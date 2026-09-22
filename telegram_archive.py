@@ -115,6 +115,7 @@ def sync_telegram_archive(
     timezone_name: str | None = None,
     today: date | None = None,
     include_today: bool = False,
+    timeout: int = 30,
     runner: RemoteRunner = subprocess.run,
 ) -> TelegramArchiveResult:
     tz = get_timezone(timezone_name)
@@ -128,6 +129,7 @@ def sync_telegram_archive(
         days,
         ssh_target=ssh_target,
         remote_dir=remote_dir,
+        timeout=timeout,
         runner=runner,
     )
     inserted = sync_telegram_updates(

@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS activities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL CHECK (source IN ('telegram', 'strava')),
+    source TEXT NOT NULL CHECK (source IN ('telegram', 'strava', 'writing', 'social')),
     external_id TEXT NOT NULL,
     timestamp DATETIME NOT NULL,
     local_date TEXT NOT NULL,

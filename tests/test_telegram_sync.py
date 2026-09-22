@@ -275,6 +275,41 @@ class TelegramSyncTests(unittest.TestCase):
         rows = self.conn.execute("SELECT COUNT(*) AS count FROM activities").fetchone()
         self.assertEqual(rows["count"], 0)
 
+    def test_oversized_message_is_not_sent_to_parser(self) -> None:
+        def request_get(url, params, timeout):
+            return {
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 12,
+                        "message": {
+                            "message_id": 81,
+                            "date": 1783929600,
+                            "from": {"id": 123},
+                            "text": "x" * 101,
+                        },
+                    }
+                ],
+            }
+
+        parser_called = False
+
+        def parser(text):
+            nonlocal parser_called
+            parser_called = True
+            return {"is_workout": True, "duration_minutes": 45}
+
+        count = sync_telegram(
+            self.conn,
+            token="token",
+            allowed_user_id=123,
+            parser=parser,
+            request_get=request_get,
+            max_message_chars=100,
+        )
+        self.assertEqual(count, 0)
+        self.assertFalse(parser_called)
+
     def test_openai_parser_uses_structured_output_schema(self) -> None:
         client = FakeOpenAIClient()
         parsed = parse_workout_with_openai("45 minutes strength", client=client, model="test-model")
