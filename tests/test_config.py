@@ -83,6 +83,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.social.reminder_after_days, 5)
         self.assertEqual(config.social.post_points, 750)
 
+    def test_local_config_overlays_public_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.yaml").write_text(
+                "visual:\n  target_resolution: 800x600\n"
+                "social:\n  enabled: false\n",
+                encoding="utf-8",
+            )
+            (root / "config.local.yaml").write_text(
+                "social:\n  enabled: true\n  bluesky_rss_url: https://example.test/rss\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(root / "config.local.yaml")
+
+            self.assertEqual(config.visual.target_resolution, "800x600")
+            self.assertTrue(config.social.enabled)
+            self.assertEqual(config.social.bluesky_rss_url, "https://example.test/rss")
+
     def test_invalid_color_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             app_config_from_dict({"visual": {"bg_color": "navy"}})

@@ -153,6 +153,16 @@ def calculate_activity_points(
                 intensity=intensity,
             )
 
+    if source == "writing" and isinstance(raw_payload, dict) and "day_words" in raw_payload:
+        day_words = max(0, _int(raw_payload.get("day_words")))
+        points_per_word = max(0.0, _number(raw_payload.get("points_per_word"), 1.0))
+        return round(day_words * points_per_word, 1), {
+            "method": "writing_word_delta",
+            "formula_version": FORMULA_VERSION,
+            "day_words": day_words,
+            "points_per_word": points_per_word,
+        }
+
     minute_value = DEFAULT_GENERIC_MINUTE_VALUE * _intensity_multiplier(intensity)
     return round(duration_minutes * minute_value, 1), {
         "method": "duration_fallback",

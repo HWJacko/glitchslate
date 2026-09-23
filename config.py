@@ -372,16 +372,33 @@ def app_config_from_dict(raw: dict[str, Any]) -> AppConfig:
 
 def load_config(path: str | Path | None = None) -> AppConfig:
     config_path = Path(path or os.getenv("GLITCHSLATE_CONFIG_PATH", DEFAULT_CONFIG_PATH))
-    if not config_path.exists():
-        return app_config_from_dict({})
     try:
         import yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to read config.yaml. Run: python3 -m pip install -r requirements.txt") from exc
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(raw, dict):
-        raise ValueError("config.yaml must contain a YAML mapping")
-    return app_config_from_dict(raw)
+
+    config_paths = [config_path]
+    # A local override inherits the checked-in public defaults. This keeps
+    # private paths and account identifiers out of Git without requiring a
+    # second full copy of the public configuration.
+    if config_path.name == "config.local.yaml":
+        base_path = config_path.with_name(DEFAULT_CONFIG_PATH)
+        if base_path.exists():
+            config_paths.insert(0, base_path)
+
+    merged: dict[str, Any] = {}
+    loaded = False
+    for candidate in config_paths:
+        if not candidate.exists():
+            continue
+        raw = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{candidate} must contain a YAML mapping")
+        merged = _deep_merge(merged, raw)
+        loaded = True
+    if not loaded:
+        return app_config_from_dict({})
+    return app_config_from_dict(merged)
 
 
 def _validate_hex_color(value: str, field: str) -> None:

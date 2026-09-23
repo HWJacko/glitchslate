@@ -164,6 +164,84 @@ external_metrics:
   crypy_headline_url: https://example.invalid/api/headline
 ```
 
+### Private local overrides
+
+Keep machine-specific paths, account identifiers, and private feed URLs in an ignored `config.local.yaml` rather than editing the checked-in file:
+
+```yaml
+writing:
+  enabled: true
+  projects:
+    - id: research
+      label: RESEARCH NOTES
+      path: ~/Documents/Research/Draft
+      activity_type: research
+      weekly_goal_words: 2500
+
+social:
+  enabled: true
+  bluesky_rss_url: https://bsky.app/profile/your-handle/rss
+```
+
+Point the local environment at it:
+
+```text
+GLITCHSLATE_CONFIG_PATH=config.local.yaml
+```
+
+When the selected file is named `config.local.yaml`, it is merged over `config.yaml`, so the override only needs to contain changed values. `config.local.yaml` and `.env` are ignored by Git; still check `git status --ignored` before publishing.
+
+## Adding elements to the visual
+
+There are two supported extension patterns.
+
+### Add a chart bucket
+
+An activity becomes chart data when a sync function writes an `Activity` through `db.upsert_activity`. The current bucket mapping is:
+
+| Stored source/type | Chart bucket | Affects fitness score by default? |
+| --- | --- | --- |
+| `strava` + `run` | `run` | Yes |
+| `telegram` | `workout` | Yes |
+| `writing` + any `activity_type` | that activity type, such as `research` | No |
+| `social` | `social` | No |
+
+For a new writing-style source, give the activity a new `activity_type`; it will appear as a new stacked segment automatically. To give it a deliberate order, label, or colour, update `BUCKET_ORDER`, `BUCKET_LABELS`, and `bucket_colors` in `visual_engine.py`. Unknown buckets fall back to uppercase labels and the normal text colour.
+
+A new source needs more plumbing: add it to the `activities.source` check in `schema.sql`, update the legacy-table migration in `db.py`, map it in `_bucket_for_activity`, and add its name to `scoring.included_sources` if it should affect the score. Add an idempotency test for its `(source, external_id)` pair.
+
+### Add a top-right metric
+
+The external-signals area accepts `ExternalMetric` values. A sync module should fetch or calculate the value, then `main.py` appends it before calling `render_wallpaper`:
+
+```python
+from external_metrics import ExternalMetric
+
+top_right_metrics.append(
+    ExternalMetric(
+        label="FOCUS TIME",
+        value="12H",
+        status="FRESH",
+        stale=False,
+        polarity="positive",
+    )
+)
+```
+
+The renderer displays up to six metrics. `polarity` controls the value colour (`positive`, `negative`, or `neutral`), and `stale=True` changes the detail text to the alert colour. Put credentials in `.env`, endpoints/timeouts in a config dataclass and `config.yaml`, and make the network call opt-in like the existing integrations.
+
+### Add a new panel or visual treatment
+
+For a panel that is larger than a metric or chart bucket:
+
+1. Add its user-facing settings to a dataclass in `config.py` and expose safe defaults in `config.yaml`.
+2. Pass the configured values from `main.py` into `render_wallpaper`.
+3. Add the drawing logic in `visual_engine.py`, keeping data collection separate from rendering.
+4. Extend `RenderDiagnostics` if the element needs smoke-test visibility.
+5. Add a renderer test in `tests/test_visual_and_os.py` and exercise it with `scripts/build_mock_output.py`.
+
+This keeps new visual elements local-first, configurable, and testable without putting private data or credentials into the repository.
+
 ## Running Manually
 
 Dry-run without persisting score state or applying the wallpaper:

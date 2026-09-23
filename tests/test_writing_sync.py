@@ -63,6 +63,9 @@ class WritingSyncTests(unittest.TestCase):
             self.assertEqual(row["activity_type"], "short_story")
             self.assertEqual(row["points"], 3)
             self.assertEqual(get_sync_state(conn, "writing:shorts:week:2026-09-14:baseline_words"), "2")
+            init_db(conn)
+            row = conn.execute("SELECT points FROM activities").fetchone()
+            self.assertEqual(row["points"], 3)
             conn.close()
 
 
