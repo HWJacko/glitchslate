@@ -67,6 +67,10 @@ def exchange_code(*, client_id: str, client_secret: str, code: str) -> dict[str,
 
 
 def update_env_value(path: Path, key: str, value: str) -> None:
+    # The file contains credentials. Protect it before reading or writing so
+    # a permissive umask cannot leave a newly created or existing .env public.
+    path.touch(mode=0o600, exist_ok=True)
+    path.chmod(0o600)
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     prefix = f"{key}="
     for index, line in enumerate(lines):
@@ -76,6 +80,7 @@ def update_env_value(path: Path, key: str, value: str) -> None:
     else:
         lines.append(f"{key}={value}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
 
 
 def command_authorize(args: argparse.Namespace) -> int:
