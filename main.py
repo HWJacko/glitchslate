@@ -217,8 +217,10 @@ def run_pipeline(
         )
         priority_message = next_target_priority(target_progress, today=today)
         for item in target_progress:
-            current = int(item.value) if item.value.is_integer() else round(item.value, 1)
-            target = int(item.target) if item.target.is_integer() else round(item.target, 1)
+            current_value = float(item.value)
+            target_value = float(item.target)
+            current = int(current_value) if current_value.is_integer() else round(current_value, 1)
+            target = int(target_value) if target_value.is_integer() else round(target_value, 1)
             print(f"target {item.key}={current}/{target} {item.unit} ({item.percentage:.0f}%)")
 
     score = calculate_daily_score(
@@ -303,8 +305,10 @@ def run_pipeline(
 
     if app_config.targets.enabled and app_config.targets.show_on_wallpaper:
         for item in target_progress:
-            current = int(item.value) if item.value.is_integer() else round(item.value, 1)
-            target = int(item.target) if item.target.is_integer() else round(item.target, 1)
+            current_value = float(item.value)
+            target_value = float(item.target)
+            current = int(current_value) if current_value.is_integer() else round(current_value, 1)
+            target = int(target_value) if target_value.is_integer() else round(target_value, 1)
             top_right_metrics.append(
                 ExternalMetric(
                     label=f"WEEK {item.label}",

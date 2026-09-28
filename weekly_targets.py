@@ -394,10 +394,12 @@ def next_target_priority(progress: Iterable[WeeklyTargetProgress], *, today: dat
     remaining = max(0.0, selected.target - selected.value)
     days_left = max(1, 7 - today.weekday())
     daily_pace = remaining / days_left
-    current = int(selected.value) if selected.value.is_integer() else round(selected.value, 1)
-    target = int(selected.target) if selected.target.is_integer() else round(selected.target, 1)
-    remaining_display = int(remaining) if remaining.is_integer() else round(remaining, 1)
-    pace_display = int(daily_pace) if daily_pace.is_integer() else round(daily_pace, 1)
+    current_value = float(selected.value)
+    target_value = float(selected.target)
+    current = int(current_value) if current_value.is_integer() else round(current_value, 1)
+    target = int(target_value) if target_value.is_integer() else round(target_value, 1)
+    remaining_display = int(remaining) if float(remaining).is_integer() else round(float(remaining), 1)
+    pace_display = int(daily_pace) if float(daily_pace).is_integer() else round(float(daily_pace), 1)
     if current == 0:
         state = "no contribution yet"
     else:
@@ -415,7 +417,9 @@ def format_weekly_targets(progress: Iterable[WeeklyTargetProgress]) -> str:
         return "No weekly targets configured."
     lines = [f"WEEKLY TARGETS // WEEK OF {items[0].week_start}"]
     for item in items:
-        value = int(item.value) if item.value.is_integer() else round(item.value, 1)
-        target = int(item.target) if item.target.is_integer() else round(item.target, 1)
+        value_number = float(item.value)
+        target_number = float(item.target)
+        value = int(value_number) if value_number.is_integer() else round(value_number, 1)
+        target = int(target_number) if target_number.is_integer() else round(target_number, 1)
         lines.append(f"{item.label}: {value}/{target} {item.unit} ({item.percentage:.0f}%)")
     return "\n".join(lines)
