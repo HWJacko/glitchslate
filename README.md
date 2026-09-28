@@ -1,25 +1,25 @@
 # Glitchslate
 
-Glitchslate is a local-first workout telemetry wallpaper for macOS. It ingests lightweight workout check-ins from Telegram, optional run data from Strava, scores recent consistency against your own rolling baseline, and renders a dark retro-terminal wallpaper that changes as your physical output changes.
+Glitchslate is a local-first personal accountability wallpaper for macOS. It ingests lightweight check-ins and signals from Telegram, writing folders, social feeds, Strava, and local files, compares progress with your own targets and rolling baselines, and renders a dark retro-terminal wallpaper that changes as your output changes.
 
 It is intentionally small: a SQLite database, a procedural Pillow renderer, a few sync scripts, and an optional hourly `launchd` runner.
 
 ## Why This Exists
 
-Most fitness tools ask for attention. Glitchslate gives attention back.
+Most productivity, habit, and fitness tools ask for attention. Glitchslate gives attention back.
 
-The goal is not another dashboard, habit app, or social feed. It is an ambient accountability surface: your desktop quietly reflects whether you have been maintaining physical output over the last few days. If you train, the system looks stable. If you drift, the wallpaper degrades into warning states. The feedback loop is visible without opening an app.
+The goal is not another dashboard, habit app, or social feed. It is an ambient accountability surface: your desktop quietly reflects whether you are maintaining the commitments that matter to you, whether those are exercise, writing, reading, social output, study, or another measurable practice. If you make progress, the system looks stable. If you drift, the wallpaper degrades into warning states. The feedback loop is visible without opening an app.
 
 ### Infrasieve Link Contextualization
 
 Glitchslate was synthesized as a companion project from trend-discovery and duplicate-gating signals in the autonomous pipeline behind [Infrasieve](https://infrasieve.dev).
 
-The upstream signal was not simply "fitness app". The pipeline surfaced a narrower demand pattern: developers and technical operators were building personal automation around chat-native logging, LLM-assisted parsing, local dashboards, and low-friction behavioral nudges. Duplicate-gating filtered out crowded categories like generic habit trackers, hosted wellness SaaS, and ordinary workout journals. What remained was a gap for a local, inspectable companion tool that turns informal activity messages into an always-on system-status artifact.
+The upstream signal was not simply "fitness app". The pipeline surfaced a broader demand pattern: developers and technical operators were building personal automation around chat-native logging, LLM-assisted parsing, local dashboards, and low-friction behavioral nudges. Duplicate-gating filtered out crowded categories like generic habit trackers, hosted wellness SaaS, and ordinary productivity dashboards. What remained was a gap for a local, inspectable companion tool that turns informal activity messages into an always-on system-status artifact.
 
 Technically, that trend created demand for this specific shape of project because the useful primitive is not a full product backend. It is a small bridge between:
 
 - conversational capture, where Telegram is faster than a form;
-- LLM normalization, where messy workout text becomes structured workout points;
+- LLM normalization, where messy check-ins become structured activity points;
 - rolling local state, where SQLite is enough;
 - ambient rendering, where the desktop wallpaper becomes the feedback surface;
 - scheduled local execution, where `launchd` is simpler than a hosted worker.
@@ -28,18 +28,21 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 
 ## Features
 
-- Telegram workout ingestion using bot polling.
+- Telegram check-in ingestion using bot polling.
 - Optional Hetzner Telegram archive fallback for laptop sleep/backlog gaps.
-- LLM workout parsing via OpenAI by default, with Gemini support as an optional parser provider.
-- Optional Strava run ingestion.
+- LLM activity parsing via OpenAI by default, with Gemini support as an optional parser provider.
+- Optional Strava run ingestion as one accountability source.
 - Optional Scrivener-export word-count ingestion from stacks of `.txt` files.
 - Optional Bluesky RSS ingestion for social posting cadence.
+- Centralized weekly targets for running, CINDY, writing, socials, and non-fiction writing.
+- Weekly target management from the command line or authorized Telegram commands.
+- Target-normalized chart points, an 80% weekly baseline line, and next-priority guidance.
 - Local SQLite persistence with idempotent activity inserts.
-- Daily consistency score based on today's workout points against a 30-day baseline.
-- Procedural wallpaper rendering with a 30-bar 3-day rolling chart across workout, writing, and social buckets.
+- Daily consistency score based on today's included activity points against a 30-day baseline.
+- Procedural wallpaper rendering with a 30-bar 3-day rolling chart across configured accountability buckets.
 - System status labels: `STABLE`, `DRIFTING`, `AT RISK`, `CRITICAL`.
 - Optional OpenAI-generated sentient status log rendered on the wallpaper.
-- Pseudo-systemd telemetry box based on today's workout volume and inactivity gap.
+- Pseudo-systemd telemetry box based on today's activity volume and inactivity gap.
 - Time-ramped criticality so warning states stay quieter early and become more urgent later in the day.
 - Criticality-dependent edge vignette.
 - macOS wallpaper application through `osascript`.
@@ -50,33 +53,40 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 The main pipeline is `main.py`:
 
 1. Load `.env` and `config.yaml` from the repository directory.
-2. Poll Telegram for new messages.
-3. Parse workout-like messages into structured activity records.
-4. Optionally sync Strava runs.
-5. Calculate today's score against the daily baseline target.
+2. Poll Telegram for new check-ins and target commands.
+3. Parse activity-like messages into structured activity records.
+4. Sync any other enabled sources, such as writing folders, social feeds, Strava, or local portfolio snapshots.
+5. Calculate today's consistency score and this week's target progress.
 6. Render a wallpaper into `assets/`.
 7. Apply it as the macOS desktop wallpaper unless `--dry-run` or `--no-apply` is used.
 
 Generated wallpapers and the local database are ignored by Git.
 
-## Scoring Model
+## Accountability model
 
-Glitchslate scores consistency, not absolute athletic performance.
+Glitchslate has two related measures:
+
+- The daily consistency score compares points from `scoring.included_sources` with your rolling baseline. The checked-in configuration includes no personal sources by default; add the sources you configure locally.
+- Weekly targets compare unlike commitments on a common scale. Completing one target contributes 1,000 normalized points, whether that means 20 km, three sessions, 1,000 words, or two posts. The chart baseline is the configured fraction of the combined weekly target capacity, 80% by default.
+
+The daily score is a consistency signal, not a judgement of absolute performance. Source adapters can use different raw formulas before contributing points:
 
 ```text
 strength_points = reps * weight_kg * movement_multiplier
 running_points = moving_minutes * running_value
-today_points = total workout points for the current local calendar day
-baseline_daily_points = average daily workout points over the last 30 local calendar days
-expected_daily_points = max(min_expected_5_day_points / 5, baseline_daily_points)
+today_points = total included activity points for the current local calendar day
+baseline_daily_points = average daily included activity points over the last 30 local calendar days
+expected_daily_points = max(min_expected_5_day_points / recent_window_days, baseline_daily_points)
 score = clamp(round((today_points / expected_daily_points) * 100), 0, 100)
 ```
 
 The persisted score remains the raw activity score. For wallpaper rendering and the optional sentient log, Glitchslate applies a configurable daytime criticality ramp to the score shortfall. With the default config, shortfall severity is 15% strength before 06:00 and increases linearly to full strength by 22:00, so a blank morning is quieter than a blank evening.
 
+The strength and running equations above are the default fitness adapters, not requirements of the accountability model. For other sources, add a source-specific conversion that reflects the unit being measured, then keep the target conversion consistent: `normalized_points = contribution / weekly_target * 1000`.
+
 For Strava runs, `running_value` is derived from Strava fields already stored in `raw_payload`: `moving_time`, `distance`, `average_speed`, `total_elevation_gain`, and `sport_type`. Pace and elevation adjust a base running value, while minutes remain stored as context.
 
-The chart shows 30 rolling bars. Each bar is the configured rolling point total ending on that local calendar day (`chart.rolling_window_days`, currently 3), stacked by source bucket. Fitness scoring is source-filtered by `scoring.included_sources`, so writing and social posts can appear in the chart without inflating the workout score.
+The chart shows 30 rolling bars. Each bar is the configured rolling point total ending on that local calendar day (`chart.rolling_window_days`, currently 3), stacked by source bucket. When weekly targets are shown, the bars use normalized accountability points and the chart adds the weekly baseline line. Writing and social posts can therefore contribute to target progress without inflating the default physical-activity consistency score.
 
 Writing projects are captured as positive word deltas from exported Scrivener `.txt` stacks. Glitchslate stores a weekly Monday baseline for each project and a daily activity row for the words added that day. Bluesky posts are captured from the public RSS feed as `social` activity rows, and the external signals panel shows a reminder when the latest post is older than the configured threshold.
 
@@ -84,8 +94,8 @@ Writing projects are captured as positive word deltas from exported Scrivener `.
 
 - macOS for automatic wallpaper application and `launchd` scheduling.
 - Python 3.11+ recommended.
-- A Telegram bot token and your Telegram user id for chat ingestion.
-- An OpenAI API key for the default workout parser; the optional sentient log uses it too.
+- A Telegram bot token and your Telegram user id if you want chat-based capture or target management.
+- An OpenAI API key for the default activity parser; the optional sentient log uses it too.
 - Optional Strava API credentials for run sync.
 - Optional Gemini API key if you choose `WORKOUT_PARSER_PROVIDER=gemini`.
 
@@ -135,22 +145,32 @@ scoring:
 writing:
   enabled: true
   projects:
-    - id: shorts
-      label: SHORT STORIES
-      path: ~/Documents/Shorts/Draft
-      activity_type: short_story
-      weekly_goal_words: 5000
-    - id: main
-      label: MAIN PROJECT
-      path: ~/Documents/MainProject/Draft
-      activity_type: main_project
-      weekly_goal_words: 10000
+    - id: project_a
+      label: PROJECT A
+      path: ~/Documents/Accountability/ProjectA
+      activity_type: project_a
+      weekly_goal_words: 1000
+    - id: project_b
+      label: PROJECT B
+      path: ~/Documents/Accountability/ProjectB
+      activity_type: project_b
+      weekly_goal_words: 1000
 
 social:
   enabled: true
   bluesky_rss_url: https://bsky.app/profile/your-handle/rss
   reminder_after_days: 4
   post_points: 1000
+
+targets:
+  enabled: true
+  show_on_wallpaper: true
+  baseline_fraction: 0.8
+  defaults:
+    - {key: activity, label: ACTIVITY, target: 3, unit: sessions, metric: activity_sessions}
+    - {key: project_a, label: PROJECT A, target: 1000, unit: words, metric: writing_words}
+    - {key: project_b, label: PROJECT B, target: 1000, unit: words, metric: writing_words}
+    - {key: social, label: SOCIAL POSTS, target: 2, unit: posts, metric: social_posts}
 
 strava:
   enabled: true
@@ -163,6 +183,19 @@ external_metrics:
   crypy_headline_enabled: false
   crypy_headline_url: https://example.invalid/api/headline
 ```
+
+Weekly targets are seeded into the local SQLite database at the start of each week. Changes made during a week carry forward to the next week; `reset` restores the configured defaults for the selected week. The checked-in config has no target or writing data; add your projects and target defaults in `config.local.yaml`.
+
+Manage them manually:
+
+```bash
+python3 targets.py list
+python3 targets.py set run 25
+python3 targets.py set non_fiction 300
+python3 targets.py reset
+```
+
+The authorized Telegram user can use `/targets`, `/target run 25`, `/targets set social 3`, and `/targets reset`. Values may include units, such as `25km` or `1200 words`. The same weekly target rows are used by both interfaces and by the progress display. When target display is enabled, the chart converts each completed target to 1,000 comparable points, draws the configured baseline (80% by default), and calls out the most-behind target with a suggested daily pace.
 
 ### Private local overrides
 
@@ -191,6 +224,10 @@ GLITCHSLATE_CONFIG_PATH=config.local.yaml
 
 When the selected file is named `config.local.yaml`, it is merged over `config.yaml`, so the override only needs to contain changed values. `config.local.yaml` and `.env` are ignored by Git; still check `git status --ignored` before publishing.
 
+Mappings merge recursively, but YAML lists replace the whole list. If you customize `writing.projects` or `targets.defaults`, include the complete list you want to use in the local file.
+
+For example, copy `config.local.example.yaml` to `config.local.yaml` and replace its paths with your own local folders. Keep that override uncommitted.
+
 ## Adding elements to the visual
 
 There are two supported extension patterns.
@@ -199,7 +236,7 @@ There are two supported extension patterns.
 
 An activity becomes chart data when a sync function writes an `Activity` through `db.upsert_activity`. The current bucket mapping is:
 
-| Stored source/type | Chart bucket | Affects fitness score by default? |
+| Stored source/type | Chart bucket | Affects daily consistency score by default? |
 | --- | --- | --- |
 | `strava` + `run` | `run` | Yes |
 | `telegram` | `workout` | Yes |
@@ -229,6 +266,64 @@ top_right_metrics.append(
 ```
 
 The renderer displays up to six metrics. `polarity` controls the value colour (`positive`, `negative`, or `neutral`), and `stale=True` changes the detail text to the alert colour. Put credentials in `.env`, endpoints/timeouts in a config dataclass and `config.yaml`, and make the network call opt-in like the existing integrations.
+
+### Customize portfolio variables
+
+The portfolio integration is deliberately file-based: another script or service writes a small JSON snapshot, and Glitchslate reads it without needing portfolio credentials. Enable it in a private `config.local.yaml`:
+
+```yaml
+external_metrics:
+  portfolio_return_enabled: true
+  portfolio_return_path: ~/path/to/portfolio-return.json
+```
+
+The minimum snapshot is:
+
+```json
+{
+  "total_return_pct": "1.23",
+  "captured_at": "2026-01-15T09:30:00Z"
+}
+```
+
+Optional fields are `recommended_max_age_seconds`, `environment`, and `currency`. Extra fields are safe to include, but are ignored until you map them to a displayed metric. For example, to add a portfolio value or daily change:
+
+```json
+{
+  "total_return_pct": "4.21",
+  "portfolio_value_gbp": "123.45",
+  "daily_change_pct": "0.84",
+  "captured_at": "2026-01-15T09:30:00Z",
+  "environment": "LIVE"
+}
+```
+
+To display a custom field, add its parsing/formatting to `external_metrics.py`, return an `ExternalMetric`, and append it in `main.py`. Keep the producer-specific path, account identifiers, and credentials in `config.local.yaml` or `.env`; the checked-in config should contain only placeholders. The renderer supports six top-right metrics, so put the most important portfolio values first when ordering them.
+
+This pattern also works for a different portfolio or personal dashboard source: produce a local JSON snapshot with a timestamp, validate its age, convert its fields into `ExternalMetric` values, and keep fetching/authentication outside the renderer.
+
+### Adapt targets to another use case or source
+
+Weekly targets are source-neutral. A target defines a stable key, display label, unit, target value, and metric name:
+
+```yaml
+targets:
+  defaults:
+    - key: reading
+      label: READING
+      target: 3
+      unit: sessions
+      metric: reading_sessions
+```
+
+To make a new target measurable:
+
+1. Add or adapt a sync module that writes one idempotent `Activity` per source event using `(source, external_id)`, with useful details in `raw_payload`.
+2. Add the metric calculation to `_activity_metric_value()` in `weekly_targets.py`; return the source contribution in the target’s native unit.
+3. The target layer converts that contribution to normalized points: 1,000 points represents completing one target for the week.
+4. Add a test covering the source payload, weekly aggregation, rollover, and any aliases users may type in Telegram.
+
+For a new writing project, usually only add a `writing.projects[]` entry with a custom `activity_type`; word deltas then flow into the matching `writing_words` target. For a completely new source, also update the source constraint/migration in `schema.sql` and `db.py`, `_bucket_for_activity()` in `db.py`, and `scoring.included_sources` only if it should affect the daily consistency score. This separation lets the same app track study sessions, reading, language practice, finance checks, or other recurring work without embedding personal paths or account details in code.
 
 ### Add a new panel or visual treatment
 
@@ -319,7 +414,7 @@ python3 scripts/build_mock_output.py --output-root /tmp/glitchslate-demo --date 
 4. Find your Telegram user id using Telegram API tooling or a user-id helper bot.
 5. Put that id in `TELEGRAM_ALLOWED_USER_ID`.
 
-Only messages from the allowed user id are processed. Non-workout messages are ignored by the parser.
+Only messages from the allowed user id are processed. Non-activity messages are ignored by the activity parser; `/targets` and `/target ...` commands are handled separately.
 
 Example messages:
 
@@ -337,7 +432,7 @@ Example messages:
 To backdate a Telegram check-in, put a UK date at the end of the message:
 
 ```text
-CINDY 20 ROUNDS - 08/09/26
+EXAMPLE SESSION 5 ROUNDS - 15/01/26
 ```
 
 ## Hetzner Telegram Archive

@@ -130,6 +130,23 @@ class SocialConfig:
 
 
 @dataclass(frozen=True)
+class WeeklyTargetConfig:
+    key: str
+    label: str
+    target: float
+    unit: str
+    metric: str
+
+
+@dataclass(frozen=True)
+class TargetsConfig:
+    enabled: bool = True
+    show_on_wallpaper: bool = False
+    baseline_fraction: float = 0.8
+    defaults: tuple[WeeklyTargetConfig, ...] = ()
+
+
+@dataclass(frozen=True)
 class ExternalMetricsConfig:
     portfolio_return_enabled: bool = False
     portfolio_return_path: str = ""
@@ -151,6 +168,7 @@ class AppConfig:
     strava: StravaConfig = StravaConfig()
     writing: WritingConfig = WritingConfig()
     social: SocialConfig = SocialConfig()
+    targets: TargetsConfig = TargetsConfig()
     external_metrics: ExternalMetricsConfig = ExternalMetricsConfig()
 
 
@@ -243,7 +261,7 @@ def default_config_dict() -> dict[str, Any]:
             "baseline_window_days": 30,
             "min_expected_5_day_minutes": 60,
             "min_expected_5_day_points": 1500.0,
-            "included_sources": ["telegram", "strava"],
+            "included_sources": [],
         },
         "sentient_log": {
             "enabled": False,
@@ -272,8 +290,8 @@ def default_config_dict() -> dict[str, Any]:
             "timeout_seconds": 30,
         },
         "telegram": {
-            "enabled": True,
-            "direct_sync": True,
+            "enabled": False,
+            "direct_sync": False,
             "archive_enabled": False,
             "request_timeout_seconds": 10,
         },
@@ -292,6 +310,12 @@ def default_config_dict() -> dict[str, Any]:
             "reminder_after_days": 4,
             "post_points": 1000.0,
             "timeout_seconds": 10,
+        },
+        "targets": {
+            "enabled": False,
+            "show_on_wallpaper": False,
+            "baseline_fraction": 0.8,
+            "defaults": [],
         },
         "external_metrics": {
             "portfolio_return_enabled": False,
@@ -314,9 +338,9 @@ def _normalize_visual(raw: dict[str, Any]) -> VisualConfig:
 
 def _normalize_scoring(raw: dict[str, Any]) -> ScoringConfig:
     values = dict(raw)
-    included = values.get("included_sources", ["telegram", "strava"])
-    if not isinstance(included, (list, tuple)) or not included:
-        raise ValueError("scoring.included_sources must be a non-empty list")
+    included = values.get("included_sources", [])
+    if not isinstance(included, (list, tuple)):
+        raise ValueError("scoring.included_sources must be a list")
     values["included_sources"] = tuple(str(source).strip() for source in included if str(source).strip())
     return ScoringConfig(**values)
 
@@ -350,6 +374,20 @@ def _normalize_writing(raw: dict[str, Any]) -> WritingConfig:
     return WritingConfig(**values)
 
 
+def _normalize_targets(raw: dict[str, Any]) -> TargetsConfig:
+    values = dict(raw)
+    defaults = values.get("defaults", [])
+    if not isinstance(defaults, (list, tuple)):
+        raise ValueError("targets.defaults must be a list")
+    normalized: list[WeeklyTargetConfig] = []
+    for index, target in enumerate(defaults):
+        if not isinstance(target, dict):
+            raise ValueError(f"targets.defaults[{index}] must be a mapping")
+        normalized.append(WeeklyTargetConfig(**dict(target)))
+    values["defaults"] = tuple(normalized)
+    return TargetsConfig(**values)
+
+
 def app_config_from_dict(raw: dict[str, Any]) -> AppConfig:
     data = _deep_merge(default_config_dict(), raw or {})
     config = AppConfig(
@@ -364,6 +402,7 @@ def app_config_from_dict(raw: dict[str, Any]) -> AppConfig:
         strava=StravaConfig(**data["strava"]),
         writing=_normalize_writing(data["writing"]),
         social=SocialConfig(**data["social"]),
+        targets=_normalize_targets(data["targets"]),
         external_metrics=ExternalMetricsConfig(**data["external_metrics"]),
     )
     validate_config(config)
@@ -434,8 +473,6 @@ def validate_config(config: AppConfig) -> None:
         raise ValueError("scoring.baseline_window_days must be at least recent_window_days")
     if config.scoring.min_expected_5_day_minutes <= 0:
         raise ValueError("scoring.min_expected_5_day_minutes must be positive")
-    if not config.scoring.included_sources:
-        raise ValueError("scoring.included_sources must not be empty")
     if config.sentient_log.max_chars <= 0:
         raise ValueError("sentient_log.max_chars must be positive")
     if config.parser.provider.lower() not in {"auto", "openai", "gemini"}:
@@ -494,6 +531,21 @@ def validate_config(config: AppConfig) -> None:
     if config.social.timeout_seconds <= 0:
         raise ValueError("social.timeout_seconds must be positive")
     _validate_http_url(config.social.bluesky_rss_url, "social.bluesky_rss_url", allow_placeholder=True)
+    if not 0 < config.targets.baseline_fraction <= 1:
+        raise ValueError("targets.baseline_fraction must be greater than 0 and at most 1")
+    seen_target_keys: set[str] = set()
+    for target in config.targets.defaults:
+        if not target.key.strip():
+            raise ValueError("targets.defaults[].key must not be empty")
+        if target.key in seen_target_keys:
+            raise ValueError(f"weekly target key must be unique: {target.key}")
+        seen_target_keys.add(target.key)
+        if not target.label.strip():
+            raise ValueError(f"weekly target {target.key} label must not be empty")
+        if target.target <= 0:
+            raise ValueError(f"weekly target {target.key} target must be positive")
+        if not target.unit.strip() or not target.metric.strip():
+            raise ValueError(f"weekly target {target.key} unit and metric must not be empty")
     if config.external_metrics.portfolio_return_enabled and not config.external_metrics.portfolio_return_path.strip():
         raise ValueError("external_metrics.portfolio_return_path is required when portfolio_return_enabled")
     if config.external_metrics.crypy_headline_enabled and not config.external_metrics.crypy_headline_url.strip():

@@ -19,7 +19,8 @@ scoring:
   baseline_window_days: 30
   min_expected_5_day_minutes: 60
   min_expected_5_day_points: 1500
-  included_sources: ["telegram", "strava"]
+  # Add the sources you want to include after configuring them locally.
+  included_sources: []
 
 
 sentient_log:
@@ -50,8 +51,8 @@ telegram_archive:
   timeout_seconds: 30
 
 telegram:
-  enabled: true
-  direct_sync: true
+  enabled: false
+  direct_sync: false
   archive_enabled: false
   request_timeout_seconds: 10
 
@@ -63,7 +64,15 @@ strava:
 
 writing:
   enabled: false
+  # Add your folders in config.local.yaml after configuring the collector.
   projects: []
+
+targets:
+  enabled: false
+  show_on_wallpaper: false
+  baseline_fraction: 0.8
+  # Add target definitions in config.local.yaml.
+  defaults: []
 
 social:
   enabled: false

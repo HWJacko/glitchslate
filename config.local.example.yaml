@@ -1,0 +1,45 @@
+# Copy this file to config.local.yaml and customize it for your machine.
+# config.local.yaml is ignored by Git and must not be published.
+
+writing:
+  enabled: true
+  projects:
+    - id: project_a
+      label: PROJECT A
+      path: ~/Documents/accountability/project-a
+      activity_type: project_a
+      weekly_goal_words: 1000
+    - id: project_b
+      label: PROJECT B
+      path: ~/Documents/accountability/project-b
+      activity_type: project_b
+      weekly_goal_words: 1000
+
+targets:
+  enabled: true
+  show_on_wallpaper: true
+  baseline_fraction: 0.8
+  defaults:
+    - key: project_a
+      label: PROJECT A
+      target: 1000
+      unit: words
+      metric: writing_words
+    - key: project_b
+      label: PROJECT B
+      target: 1000
+      unit: words
+      metric: writing_words
+    - key: social
+      label: SOCIAL POSTS
+      target: 2
+      unit: posts
+      metric: social_posts
+
+# Add private feed URLs or portfolio paths here when those integrations are enabled.
+# social:
+#   enabled: true
+#   bluesky_rss_url: https://bsky.app/profile/your-handle/rss
+# external_metrics:
+#   portfolio_return_enabled: true
+#   portfolio_return_path: ~/path/to/portfolio-return.json

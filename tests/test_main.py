@@ -114,9 +114,9 @@ class MainPipelineTests(unittest.TestCase):
 
             portfolio_metric = ExternalMetric("PORTFOLIO RETURN", "-0.24%", "STALE", True, "negative")
             crypy_metrics = [
-                ExternalMetric("CRYPY PORTFOLIO", "GBP 617.59", "LIVE"),
-                ExternalMetric("CRYPY VS BTC 1D", "-0.02%", "LIVE", polarity="negative"),
-                ExternalMetric("CRYPY REALISED 1D", "GBP +12.34", "LIVE", polarity="positive"),
+                ExternalMetric("CRYPY PORTFOLIO", "GBP 123.45", "LIVE"),
+                ExternalMetric("CRYPY VS BTC 1D", "-1.23%", "LIVE", polarity="negative"),
+                ExternalMetric("CRYPY REALISED 1D", "GBP +4.56", "LIVE", polarity="positive"),
             ]
             with patch.dict(
                 "os.environ",

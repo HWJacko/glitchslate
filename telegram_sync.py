@@ -4,13 +4,20 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from config import get_timezone, load_dotenv
 from db import Activity, connect, get_sync_state, init_db, set_sync_state, upsert_activity
 from known_workouts import parse_known_workout
+from weekly_targets import (
+    format_weekly_targets,
+    set_weekly_target,
+    weekly_target_progress,
+    reset_weekly_targets,
+)
 
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
@@ -31,6 +38,7 @@ WORKOUT_SCHEMA: dict[str, Any] = {
         "is_workout": {"type": "boolean"},
         "activity_type": {"type": "string"},
         "duration_minutes": {"type": "integer"},
+        "distance_km": {"type": "number"},
         "intensity": {"type": "string"},
         "notes": {"type": "string"},
         "exercises": {
@@ -59,7 +67,7 @@ WORKOUT_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["is_workout", "activity_type", "duration_minutes", "intensity", "notes", "exercises"],
+    "required": ["is_workout", "activity_type", "duration_minutes", "distance_km", "intensity", "notes", "exercises"],
     "additionalProperties": False,
 }
 
@@ -67,8 +75,9 @@ WORKOUT_SCHEMA: dict[str, Any] = {
 def _workout_prompt(text: str) -> str:
     return (
         "Extract workout information from this message. Return only JSON with keys "
-        "is_workout, activity_type, duration_minutes, intensity, notes, exercises. "
+        "is_workout, activity_type, duration_minutes, distance_km, intensity, notes, exercises. "
         "Use is_workout=false when the text is not a workout check-in. If the message describes sets, reps, weights, or bodyweight exercises but not duration, infer a conservative duration_minutes estimate from the described work. "
+        "For a run, extract the distance in kilometres as distance_km, or use 0 when no distance is given. "
         "Known workout: CINDY means 5 pullups, 10 situps, and 15 standing squats per round, repeated as many rounds as possible in 20 minutes. For a message like 'CINDY 7 rounds', expand exercises to 35 pullups, 70 situps, and 105 standing squats. "
         "For exercises, return one object per movement with total_reps, weight_kg, bodyweight, and movement_multiplier. Use weight_kg=0 when no external load is specified, bodyweight=true for bodyweight movements, movement_multiplier=1 unless the movement is clearly partial or unusually demanding, and exercises=[] when reps/loads are unclear.\n\n"
         f"Message: {text}"
@@ -89,6 +98,22 @@ def _request_get(url: str, params: dict[str, Any], timeout: int = 30) -> dict[st
     if not data.get("ok"):
         raise RuntimeError("Telegram API returned ok=false")
     return data
+
+
+def _request_post(url: str, data: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
+    try:
+        import requests
+    except ImportError as exc:
+        raise RuntimeError("requests is required for Telegram sync") from exc
+    try:
+        response = requests.post(url, data=data, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException:
+        raise RuntimeError("Telegram API request failed") from None
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError("Telegram API returned ok=false")
+    return result
 
 
 def fetch_updates(
@@ -260,6 +285,65 @@ def _message_datetime(message: dict[str, Any]) -> datetime:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
 
+def _target_command(text: str) -> tuple[str, list[str]] | None:
+    try:
+        parts = shlex.split(text.strip())
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    command = parts[0].lower().split("@", 1)[0]
+    if command not in {"/target", "/targets", "target", "targets"}:
+        return None
+    return command.lstrip("/"), parts[1:]
+
+
+def _parse_target_value(value: str) -> float:
+    cleaned = value.strip().lower().replace(",", "")
+    cleaned = re.sub(r"(?:km|kilometers?|sessions?|words?|posts?)$", "", cleaned).strip()
+    parsed = float(cleaned)
+    if parsed <= 0:
+        raise ValueError("target value must be positive")
+    return parsed
+
+
+def _handle_target_command(
+    conn,
+    text: str,
+    *,
+    defaults,
+    today: date,
+) -> str | None:
+    parsed = _target_command(text)
+    if parsed is None:
+        return None
+    command, args = parsed
+    progress = weekly_target_progress(conn, defaults, today=today)
+    if command == "targets" and (not args or args[0].lower() in {"list", "show"}):
+        return format_weekly_targets(progress)
+    if args and args[0].lower() == "reset":
+        reset_weekly_targets(conn, defaults, week_start=today - timedelta(days=today.weekday()))
+        return "Weekly targets reset to defaults.\n\n" + format_weekly_targets(
+            weekly_target_progress(conn, defaults, today=today)
+        )
+    if command == "targets" and args and args[0].lower() == "set":
+        args = args[1:]
+    if len(args) != 2:
+        return "Usage: /target <run|cindy|short_story|main_project|social|non_fiction> <value>"
+    try:
+        value = _parse_target_value(args[1])
+        changed = set_weekly_target(
+            conn,
+            defaults,
+            key=args[0],
+            target=value,
+            week_start=today - timedelta(days=today.weekday()),
+        )
+    except (ValueError, TypeError) as exc:
+        return f"Target not changed: {exc}"
+    return f"{changed.label} target set to {changed.target:g} {changed.unit}."
+
+
 def _extract_historical_local_date(text: str) -> tuple[str, date | None]:
     match = HISTORICAL_DATE_SUFFIX_RE.search(text)
     if match is None:
@@ -299,6 +383,9 @@ def sync_telegram_updates(
     allowed_local_dates: set[str] | None = None,
     skip_existing: bool = False,
     max_message_chars: int = 4_000,
+    target_defaults=None,
+    send_message: Callable[[str, dict[str, Any], int], dict[str, Any]] | None = None,
+    target_reply_timeout: int = 30,
 ) -> int:
     inserted = 0
     tz = get_timezone(timezone_name)
@@ -315,6 +402,33 @@ def sync_telegram_updates(
         if not text:
             continue
         external_id = str(message["message_id"])
+
+        if _target_command(text) is not None:
+            if dry_run:
+                print(f"telegram target command: {text}")
+                continue
+            if target_defaults is None:
+                print("Telegram target command ignored: no target defaults configured", file=sys.stderr)
+                continue
+            response_text = _handle_target_command(
+                conn,
+                text,
+                defaults=target_defaults,
+                today=_message_datetime(message).astimezone(tz).date(),
+            )
+            if response_text and send_message is not None:
+                chat = message.get("chat") or {}
+                chat_id = chat.get("id")
+                if chat_id is not None:
+                    try:
+                        send_message(
+                            str(chat_id),
+                            {"chat_id": chat_id, "text": response_text},
+                            target_reply_timeout,
+                        )
+                    except Exception as exc:
+                        print(f"Telegram target reply failed: {exc}", file=sys.stderr)
+            continue
 
         message_datetime = _message_datetime(message)
         if allowed_local_dates is not None:
@@ -387,6 +501,8 @@ def sync_telegram(
     timezone_name: str | None = None,
     request_timeout: int = 10,
     max_message_chars: int = 4_000,
+    target_defaults=None,
+    request_post: Callable[[str, dict[str, Any], int], dict[str, Any]] = _request_post,
 ) -> int:
     last_update = get_sync_state(conn, "telegram_last_update_id")
     offset = int(last_update) + 1 if last_update is not None else None
@@ -406,6 +522,11 @@ def sync_telegram(
         dry_run=dry_run,
         timezone_name=timezone_name,
         max_message_chars=max_message_chars,
+        target_defaults=target_defaults,
+        send_message=lambda chat_id, data, timeout: request_post(
+            f"{TELEGRAM_API_BASE}/bot{token}/sendMessage", data, timeout
+        ),
+        target_reply_timeout=request_timeout + 5,
     )
 
     if highest_update_id is not None and not dry_run:

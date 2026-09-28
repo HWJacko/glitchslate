@@ -20,6 +20,7 @@ from db import (
     set_sync_state,
 )
 from external_metrics import crypy_headline_metrics, portfolio_return_metric
+from external_metrics import ExternalMetric
 from os_sync import cleanup_old_wallpapers, set_wallpaper
 from sentient_log import fallback_sentient_log, generate_sentient_log
 from social_sync import social_snapshot_metric, sync_bluesky_posts
@@ -29,6 +30,12 @@ from telegram_sync import sync_telegram
 from telegram_sync import get_workout_parser
 from visual_engine import criticality_factor_for_time, render_wallpaper, score_with_time_criticality
 from writing_sync import sync_writing_projects
+from weekly_targets import (
+    next_target_priority,
+    target_baseline_points,
+    target_chart_points,
+    weekly_target_progress,
+)
 
 
 def _warn(message: str) -> None:
@@ -92,6 +99,7 @@ def run_pipeline(
                 parser=workout_parser,
                 request_timeout=app_config.telegram.request_timeout_seconds,
                 max_message_chars=app_config.parser.max_message_chars,
+                target_defaults=app_config.targets.defaults if app_config.targets.enabled else None,
             )
             print(f"telegram synced {telegram_count} workout activity records")
         except Exception as exc:
@@ -199,6 +207,20 @@ def run_pipeline(
                 f"days_since_latest_post={social_snapshot.days_since_latest_post}"
             )
 
+    target_progress = []
+    priority_message = None
+    if app_config.targets.enabled:
+        target_progress = weekly_target_progress(
+            conn,
+            app_config.targets.defaults,
+            today=today,
+        )
+        priority_message = next_target_priority(target_progress, today=today)
+        for item in target_progress:
+            current = int(item.value) if item.value.is_integer() else round(item.value, 1)
+            target = int(item.target) if item.target.is_integer() else round(item.target, 1)
+            print(f"target {item.key}={current}/{target} {item.unit} ({item.percentage:.0f}%)")
+
     score = calculate_daily_score(
         conn,
         today=today,
@@ -214,6 +236,27 @@ def run_pipeline(
         window_days=chart_window_days,
     )
     chart_target_points = score.expected_recent_points * chart_window_days
+    render_expected_points = chart_target_points
+    normalized_chart_points = None
+    normalized_baseline_points = None
+    if app_config.targets.enabled and app_config.targets.show_on_wallpaper:
+        normalized_chart_points = target_chart_points(
+            conn,
+            app_config.targets.defaults,
+            end_day=today,
+            point_count=app_config.chart.history_days,
+            window_days=chart_window_days,
+        )
+        normalized_baseline_points = target_baseline_points(
+            len(target_progress),
+            window_days=chart_window_days,
+            baseline_fraction=app_config.targets.baseline_fraction,
+        )
+        if app_config.targets.baseline_fraction > 0:
+            render_expected_points = max(
+                render_expected_points,
+                normalized_baseline_points / app_config.targets.baseline_fraction,
+            )
     today_points = points_for_day(conn, today, source_names=app_config.scoring.included_sources)
     gap_days = current_gap_days(conn, end_day=today, source_names=app_config.scoring.included_sources)
     last_run_details = get_last_run_details(conn)
@@ -258,6 +301,19 @@ def run_pipeline(
     except Exception as exc:
         _warn(f"Crypy headline warning: {exc}")
 
+    if app_config.targets.enabled and app_config.targets.show_on_wallpaper:
+        for item in target_progress:
+            current = int(item.value) if item.value.is_integer() else round(item.value, 1)
+            target = int(item.target) if item.target.is_integer() else round(item.target, 1)
+            top_right_metrics.append(
+                ExternalMetric(
+                    label=f"WEEK {item.label}",
+                    value=f"{current:g}/{target:g} {item.unit}",
+                    status=f"{item.percentage:.0f}%",
+                    polarity="positive" if item.complete else "neutral",
+                )
+            )
+
     sentient_log = None
     if app_config.sentient_log.enabled and not dry_run:
         sentient_log = get_cached_sentient_log(
@@ -301,10 +357,13 @@ def run_pipeline(
         height=render_height,
         visual_config=app_config.visual,
         chart_points=chart_points,
+        target_chart_points=normalized_chart_points,
         chart_window_days=chart_window_days,
+        chart_baseline_points=normalized_baseline_points,
+        chart_baseline_fraction=app_config.targets.baseline_fraction,
         streak_days=score.streak_days,
         streak_pending=score.streak_pending,
-        expected_recent_points=chart_target_points,
+        expected_recent_points=render_expected_points,
         today_points=today_points,
         gap_days=gap_days,
         last_run_details=last_run_details,
@@ -314,6 +373,7 @@ def run_pipeline(
         systemd_alert_gap_days=app_config.telemetry.gap_alert_days,
         criticality_factor=criticality_factor,
         top_right_metrics=top_right_metrics,
+        next_priority=priority_message,
     )
     if not app_config.visual.keep_archive_images:
         cleanup_old_wallpapers(assets_dir, older_than_hours=app_config.visual.archive_retention_hours)
@@ -333,6 +393,7 @@ def run_pipeline(
         f"baseline_daily_points={score.baseline_daily_points:.2f} "
         f"expected_daily_points={score.expected_recent_points:.2f} "
         f"today_points={today_points} gap_days={gap_days} "
+        f"next_priority={priority_message or 'none'} "
         f"glitch_factor={result.glitch_factor:.2f} wallpaper={result.timestamped_path}"
     )
     print(

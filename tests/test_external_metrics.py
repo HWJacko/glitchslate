@@ -65,9 +65,9 @@ class ExternalMetricTests(unittest.TestCase):
 
             def json(self) -> dict[str, str]:
                 return {
-                    "portfolio_value_gbp": "617.59",
-                    "portfolio_vs_btc_1d_percent": "-0.02",
-                    "active_realized_pnl_1d_gbp": "12.345",
+                    "portfolio_value_gbp": "123.45",
+                    "portfolio_vs_btc_1d_percent": "-1.23",
+                    "active_realized_pnl_1d_gbp": "4.56",
                 }
 
         with mock.patch.dict(
@@ -86,7 +86,7 @@ class ExternalMetricTests(unittest.TestCase):
             [metric.label for metric in metrics],
             ["CRYPY PORTFOLIO", "CRYPY VS BTC 1D", "CRYPY REALISED 1D"],
         )
-        self.assertEqual([metric.value for metric in metrics], ["GBP 617.59", "-0.02%", "GBP +12.34"])
+        self.assertEqual([metric.value for metric in metrics], ["GBP 123.45", "-1.23%", "GBP +4.56"])
         self.assertEqual([metric.polarity for metric in metrics], ["neutral", "negative", "positive"])
         self.assertTrue(all(metric.status == "LIVE" for metric in metrics))
 

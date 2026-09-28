@@ -29,3 +29,14 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value TEXT NOT NULL,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS weekly_targets (
+    week_start TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    target_value REAL NOT NULL CHECK (target_value > 0),
+    unit TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (week_start, target_key)
+);

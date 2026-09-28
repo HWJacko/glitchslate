@@ -14,12 +14,14 @@ from config import VisualConfig
 
 WIDTH = 3840
 HEIGHT = 2160
-BUCKET_ORDER = ["run", "workout", "short_story", "main_project", "social", "other"]
+BUCKET_ORDER = ["run", "workout", "short_story", "main_project", "non_fiction", "social", "other"]
 BUCKET_LABELS = {
     "run": "RUN",
     "workout": "WORKOUT",
+    "cindy": "CINDY",
     "short_story": "SHORT",
     "main_project": "MAIN",
+    "non_fiction": "NON-FICTION",
     "social": "SOCIAL",
     "other": "OTHER",
 }
@@ -479,6 +481,10 @@ def render_wallpaper(
     systemd_alert_gap_days: int = 3,
     criticality_factor: float = 1.0,
     top_right_metrics: list[Any] | None = None,
+    target_chart_points: list[Any] | None = None,
+    chart_baseline_points: float | None = None,
+    chart_baseline_fraction: float = 0.8,
+    next_priority: str | None = None,
 ) -> RenderResult:
     config = visual_config or VisualConfig(target_resolution=f"{width}x{height}")
     output_path = Path(output_dir)
@@ -487,12 +493,16 @@ def render_wallpaper(
     timestamped = output_path / f"wallpaper_{stamp}.png"
     current = output_path / "wallpaper_current.png"
 
-    points = _coerce_chart_points(chart_points or [], day)
+    points = _coerce_chart_points(
+        target_chart_points if target_chart_points is not None else chart_points or [],
+        day,
+    )
     values = [int(point["total_points"]) for point in points]
     latest_populated_index = next((index for index in range(len(values) - 1, -1, -1) if values[index] > 0), None)
     latest = values[latest_populated_index] if latest_populated_index is not None else 0
     max_points = max(values) if values else 0
-    bar_scale = max(float(expected_recent_points), float(max_points), 1.0)
+    baseline_points = max(0.0, float(chart_baseline_points or 0.0))
+    bar_scale = max(float(expected_recent_points), float(max_points), baseline_points, 1.0)
     status = system_status(score)
     vignette = vignette_mode(score) if show_vignette else "off"
     metric_rows = _coerce_top_right_metrics(top_right_metrics)
@@ -516,8 +526,10 @@ def render_wallpaper(
         bucket_colors = {
             "run": run_color,
             "workout": other_color,
+            "cindy": (34, 211, 238),
             "short_story": (251, 191, 36),
             "main_project": (244, 114, 182),
+            "non_fiction": (167, 139, 250),
             "social": positive,
             "other": muted,
         }
@@ -591,6 +603,24 @@ def render_wallpaper(
                 bbox = draw.textbbox((0, 0), day_label, font=small_font)
                 draw.text((int(center_x - (bbox[2] - bbox[0]) / 2), chart_bottom + int(height * 0.02)), day_label, fill=muted, font=small_font)
 
+        if baseline_points > 0:
+            baseline_ratio = min(1.0, baseline_points / bar_scale)
+            baseline_y = chart_bottom - int(chart_height * baseline_ratio)
+            baseline_color = (245, 208, 66)
+            draw.line(
+                (chart_left, baseline_y, chart_right, baseline_y),
+                fill=baseline_color,
+                width=max(1, width // 720),
+            )
+            baseline_label = f"{chart_baseline_fraction:.0%} TARGET BASELINE"
+            baseline_bbox = draw.textbbox((0, 0), baseline_label, font=small_font)
+            draw.text(
+                (chart_right - (baseline_bbox[2] - baseline_bbox[0]), baseline_y - max(12, int(height * 0.018))),
+                baseline_label,
+                fill=baseline_color,
+                font=small_font,
+            )
+
         status_color = alert if score < 50 else text
         header_x = int(width * 0.07)
         header_y = int(height * 0.08)
@@ -634,7 +664,8 @@ def render_wallpaper(
             f"TARGET {int(round(expected_recent_points))}pt/{chart_window_days}D // "
             f"{bucket_label} // WINDOW END {day}"
         )
-        draw.text((chart_left, int(height * 0.80)), footer, fill=muted, font=small_font)
+        footer_y = int(height * (0.82 if next_priority else 0.80))
+        draw.text((chart_left, footer_y), footer, fill=muted, font=small_font)
 
         if last_run_details is not None:
             detail_x = int(width * 0.62)
@@ -662,6 +693,15 @@ def render_wallpaper(
             for offset, line in enumerate(systemd_lines):
                 fill = alert if "ERR" in line or "DEGRADED" in line else muted
                 draw.text((log_x, log_y + offset * line_step), line, fill=fill, font=small_font)
+
+        if next_priority:
+            priority_color = alert if "no contribution" in next_priority.lower() else text
+            draw.text(
+                (chart_left, int(height * 0.79)),
+                next_priority,
+                fill=priority_color,
+                font=small_font,
+            )
 
         if sentient_log:
             _draw_centered_text(
