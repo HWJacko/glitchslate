@@ -59,8 +59,130 @@ class WeeklyTargetProgress:
         return self.value >= self.target
 
 
+@dataclass(frozen=True)
+class WeeklyPointsProgress:
+    week_start: str
+    value: int
+    target: float
+
+    @property
+    def percentage(self) -> float:
+        if self.target <= 0:
+            return 100.0
+        return min(100.0, self.value / self.target * 100.0)
+
+    @property
+    def complete(self) -> bool:
+        return self.target <= 0 or self.value >= self.target
+
+
 def week_start_for(day: date) -> date:
     return day - timedelta(days=day.weekday())
+
+
+def ensure_weekly_points_target(
+    conn: sqlite3.Connection,
+    default_target: float,
+    *,
+    week_start: date,
+) -> float:
+    """Return this week's target, creating a default snapshot when needed."""
+    row = conn.execute(
+        "SELECT target_value FROM weekly_point_targets WHERE week_start = ?",
+        (week_start.isoformat(),),
+    ).fetchone()
+    if row is not None:
+        return float(row["target_value"])
+    if default_target < 0:
+        raise ValueError("weekly points target must not be negative")
+    conn.execute(
+        "INSERT INTO weekly_point_targets (week_start, target_value) VALUES (?, ?)",
+        (week_start.isoformat(), float(default_target)),
+    )
+    conn.commit()
+    return float(default_target)
+
+
+def set_weekly_points_target(
+    conn: sqlite3.Connection,
+    default_target: float,
+    *,
+    target: float,
+    week_start: date,
+) -> float:
+    if target < 0:
+        raise ValueError("weekly points target must not be negative")
+    ensure_weekly_points_target(conn, default_target, week_start=week_start)
+    conn.execute(
+        """
+        UPDATE weekly_point_targets
+        SET target_value = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE week_start = ?
+        """,
+        (float(target), week_start.isoformat()),
+    )
+    conn.commit()
+    return float(target)
+
+
+def reset_weekly_points_target(
+    conn: sqlite3.Connection,
+    default_target: float,
+    *,
+    week_start: date,
+) -> float:
+    conn.execute("DELETE FROM weekly_point_targets WHERE week_start = ?", (week_start.isoformat(),))
+    conn.commit()
+    return ensure_weekly_points_target(conn, default_target, week_start=week_start)
+
+
+def weekly_points_total(
+    conn: sqlite3.Connection,
+    *,
+    today: date,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> int:
+    start = week_start_for(today)
+    source_clause = ""
+    source_params: tuple[str, ...] = ()
+    if source_names:
+        cleaned = tuple(str(source).strip() for source in source_names if str(source).strip())
+        if cleaned:
+            placeholders = ", ".join("?" for _ in cleaned)
+            source_clause = f" AND source IN ({placeholders})"
+            source_params = cleaned
+    row = conn.execute(
+        f"""
+        SELECT COALESCE(SUM(points), 0) AS total_points
+        FROM activities
+        WHERE local_date >= ? AND local_date <= ?
+        {source_clause}
+        """,
+        (start.isoformat(), today.isoformat(), *source_params),
+    ).fetchone()
+    return int(round(float(row["total_points"])))
+
+
+def weekly_points_progress(
+    conn: sqlite3.Connection,
+    default_target: float,
+    *,
+    today: date,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> WeeklyPointsProgress:
+    start = week_start_for(today)
+    target = ensure_weekly_points_target(conn, default_target, week_start=start)
+    return WeeklyPointsProgress(
+        week_start=start.isoformat(),
+        value=weekly_points_total(conn, today=today, source_names=source_names),
+        target=target,
+    )
+
+
+def format_weekly_points(progress: WeeklyPointsProgress) -> str:
+    target_number = float(progress.target)
+    target = int(target_number) if target_number.is_integer() else round(target_number, 1)
+    return f"WEEKLY POINTS // WEEK OF {progress.week_start}\n{progress.value}/{target} pt ({progress.percentage:.0f}%)"
 
 
 def canonical_target_key(value: str) -> str:

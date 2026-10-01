@@ -36,10 +36,10 @@ Glitchslate is therefore a deliberately compact proof of that pattern: personal 
 - Optional Bluesky RSS ingestion for social posting cadence.
 - Centralized weekly targets for running, CINDY, writing, socials, and non-fiction writing.
 - Weekly target management from the command line or authorized Telegram commands.
-- Target-normalized chart points, an 80% weekly baseline line, and next-priority guidance.
+- A Monday-Sunday cumulative weekly points chart with an adjustable weekly target.
 - Local SQLite persistence with idempotent activity inserts.
 - Daily consistency score based on today's included activity points against a 30-day baseline.
-- Procedural wallpaper rendering with a 30-bar 3-day rolling chart across configured accountability buckets.
+- Procedural wallpaper rendering with a 28-bar chart covering the previous three weeks plus the current cumulative week.
 - System status labels: `STABLE`, `DRIFTING`, `AT RISK`, `CRITICAL`.
 - Optional OpenAI-generated sentient status log rendered on the wallpaper.
 - Pseudo-systemd telemetry box based on today's activity volume and inactivity gap.
@@ -67,7 +67,8 @@ Generated wallpapers and the local database are ignored by Git.
 Glitchslate has two related measures:
 
 - The daily consistency score compares points from `scoring.included_sources` with your rolling baseline. The checked-in configuration includes no personal sources by default; add the sources you configure locally.
-- Weekly targets compare unlike commitments on a common scale. Completing one target contributes 1,000 normalized points, whether that means 20 km, three sessions, 1,000 words, or two posts. The chart baseline is the configured fraction of the combined weekly target capacity, 80% by default.
+- The weekly points total sums the stored activity points from Monday through today. By default it includes every source; restrict it with `targets.weekly_points_sources`. The target defaults to 10,000 points and can be overridden for an individual week.
+- Detailed weekly targets still track commitments such as running, writing, and social posts, and provide next-priority guidance. They are supplementary to the combined points target.
 
 The daily score is a consistency signal, not a judgement of absolute performance. Source adapters can use different raw formulas before contributing points:
 
@@ -86,7 +87,7 @@ The strength and running equations above are the default fitness adapters, not r
 
 For Strava runs, `running_value` is derived from Strava fields already stored in `raw_payload`: `moving_time`, `distance`, `average_speed`, `total_elevation_gain`, and `sport_type`. Pace and elevation adjust a base running value, while minutes remain stored as context.
 
-The chart shows 30 rolling bars. Each bar is the configured rolling point total ending on that local calendar day (`chart.rolling_window_days`, currently 3), stacked by source bucket. When weekly targets are shown, the bars use normalized accountability points and the chart adds the weekly baseline line. Writing and social posts can therefore contribute to target progress without inflating the default physical-activity consistency score.
+The chart shows four Monday-Sunday groups of cumulative bars: the previous three weeks plus the current week. Each bar is the total stored activity points accumulated from that week’s Monday through that day, stacked by source bucket. Future days in the current week remain empty, and the cumulative total resets at each Monday boundary. Writing and social posts contribute when their sources are included in `targets.weekly_points_sources` (an empty list means all sources).
 
 Writing projects are captured as positive word deltas from exported Scrivener `.txt` stacks. Glitchslate stores a weekly Monday baseline for each project and a daily activity row for the words added that day. Bluesky posts are captured from the public RSS feed as `social` activity rows, and the external signals panel shows a reminder when the latest post is older than the configured threshold.
 
@@ -166,6 +167,8 @@ targets:
   enabled: true
   show_on_wallpaper: true
   baseline_fraction: 0.8
+  weekly_points_target: 10000
+  weekly_points_sources: []
   defaults:
     - {key: activity, label: ACTIVITY, target: 3, unit: sessions, metric: activity_sessions}
     - {key: project_a, label: PROJECT A, target: 1000, unit: words, metric: writing_words}
@@ -184,18 +187,19 @@ external_metrics:
   crypy_headline_url: https://example.invalid/api/headline
 ```
 
-Weekly targets are seeded into the local SQLite database at the start of each week. Changes made during a week carry forward to the next week; `reset` restores the configured defaults for the selected week. The checked-in config has no target or writing data; add your projects and target defaults in `config.local.yaml`.
+Weekly targets are seeded into the local SQLite database at the start of each week. The combined points target is snapshotted for that Monday, so a temporary reduction does not affect future weeks; `reset` restores the configured default for the selected week. The checked-in config has no target or writing data; add your projects and target defaults in `config.local.yaml`.
 
 Manage them manually:
 
 ```bash
 python3 targets.py list
+python3 targets.py set points 8000
 python3 targets.py set run 25
 python3 targets.py set non_fiction 300
 python3 targets.py reset
 ```
 
-The authorized Telegram user can use `/targets`, `/target run 25`, `/targets set social 3`, and `/targets reset`. Values may include units, such as `25km` or `1200 words`. The same weekly target rows are used by both interfaces and by the progress display. When target display is enabled, the chart converts each completed target to 1,000 comparable points, draws the configured baseline (80% by default), and calls out the most-behind target with a suggested daily pace.
+The authorized Telegram user can use `/targets`, `/target points 8000`, `/target run 25`, `/targets set social 3`, and `/targets reset`. Values may include units, such as `25km` or `1200 words`. The combined points target and detailed weekly target rows are stored locally and displayed independently.
 
 ### Private local overrides
 

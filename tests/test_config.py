@@ -14,6 +14,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.visual.active_gradient, ("#06b6d4", "#8b5cf6"))
         self.assertEqual(config.visual.width, 3840)
         self.assertEqual(config.chart.rolling_window_days, 3)
+        self.assertEqual(config.targets.weekly_points_target, 10000.0)
+        self.assertEqual(config.targets.weekly_points_sources, ())
         self.assertEqual(config.scoring.recent_window_days, 5)
         self.assertEqual(config.scoring.included_sources, ())
         self.assertFalse(config.sentient_log.enabled)
@@ -43,6 +45,7 @@ class ConfigTests(unittest.TestCase):
                 "visual:\n  target_resolution: 800x600\n  bg_color: '#000000'\n"
                 "chart:\n  rolling_window_days: 4\n"
                 "scoring:\n  included_sources: ['telegram']\n"
+                "targets:\n  weekly_points_target: 7500\n  weekly_points_sources: ['telegram', 'writing']\n"
                 "telegram_archive:\n  enabled: true\n  blank_lookback_days: 7\n",
                 encoding="utf-8",
             )
@@ -52,6 +55,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.visual.height, 600)
             self.assertEqual(config.chart.rolling_window_days, 4)
             self.assertEqual(config.scoring.included_sources, ("telegram",))
+            self.assertEqual(config.targets.weekly_points_target, 7500)
+            self.assertEqual(config.targets.weekly_points_sources, ("telegram", "writing"))
             self.assertTrue(config.telegram_archive.enabled)
             self.assertEqual(config.telegram_archive.blank_lookback_days, 7)
 

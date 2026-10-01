@@ -485,6 +485,10 @@ def render_wallpaper(
     chart_baseline_points: float | None = None,
     chart_baseline_fraction: float = 0.8,
     next_priority: str | None = None,
+    weekly_target_points: float | None = None,
+    weekly_points_total: int | None = None,
+    week_start: str | None = None,
+    weekly_view: bool = False,
 ) -> RenderResult:
     config = visual_config or VisualConfig(target_resolution=f"{width}x{height}")
     output_path = Path(output_dir)
@@ -542,10 +546,13 @@ def render_wallpaper(
         small_font = _font(max(9, int(height * 0.012)))
         log_font = _font(max(10, int(height * 0.014)))
 
+        weekly_mode = weekly_view or weekly_target_points is not None
         chart_left = int(width * 0.09)
         chart_right = int(width * 0.91)
-        chart_top = int(height * 0.38)
-        chart_bottom = int(height * 0.74)
+        # Weekly telemetry adds two header rows. Keep its chart below the
+        # status line and make it shallower so the footer retains clear space.
+        chart_top = int(height * (0.44 if weekly_mode else 0.38))
+        chart_bottom = int(height * (0.72 if weekly_mode else 0.74))
         chart_width = chart_right - chart_left
         chart_height = chart_bottom - chart_top
 
@@ -558,6 +565,8 @@ def render_wallpaper(
         bar_width = max(4, int(slot * 0.62))
         radius = max(3, bar_width // 2)
         label_every = {latest_populated_index} if latest_populated_index is not None else set()
+        if weekly_mode:
+            label_every.update(index for index, point in enumerate(points) if bool(point["is_best"]))
 
         for index, point in enumerate(points):
             point_day = str(point["day"])
@@ -570,6 +579,16 @@ def render_wallpaper(
             x1 = int(center_x + bar_width / 2)
             empty_y0 = chart_top
             empty_y1 = chart_bottom
+            try:
+                is_week_start = datetime.fromisoformat(point_day).weekday() == 0
+            except ValueError:
+                is_week_start = False
+            if weekly_mode and is_week_start and index > 0:
+                draw.line(
+                    (int(center_x - slot / 2), chart_top, int(center_x - slot / 2), chart_bottom),
+                    fill=grid,
+                    width=max(1, width // 960),
+                )
             _rounded_rectangle(draw, (x0, empty_y0, x1, empty_y1), radius=radius, fill=empty)
             if point_value > 0:
                 ratio = min(1.0, point_value / bar_scale)
@@ -598,8 +617,12 @@ def render_wallpaper(
                 lx = int(center_x - (bbox[2] - bbox[0]) / 2)
                 ly = chart_top - int(height * 0.035)
                 draw.text((lx, ly), label, fill=text if index == count - 1 else muted, font=label_font)
-            if index % 5 == 4 or index == count - 1:
-                day_label = point_day[5:]
+            if weekly_mode:
+                show_day_label = is_week_start or index in label_every
+            else:
+                show_day_label = index % 5 == 4 or index == count - 1
+            if show_day_label:
+                day_label = f"W{point_day[5:]}" if weekly_mode and is_week_start else point_day[5:]
                 bbox = draw.textbbox((0, 0), day_label, font=small_font)
                 draw.text((int(center_x - (bbox[2] - bbox[0]) / 2), chart_bottom + int(height * 0.02)), day_label, fill=muted, font=small_font)
 
@@ -612,7 +635,7 @@ def render_wallpaper(
                 fill=baseline_color,
                 width=max(1, width // 720),
             )
-            baseline_label = f"{chart_baseline_fraction:.0%} TARGET BASELINE"
+            baseline_label = "WEEKLY TARGET" if weekly_target_points is not None else f"{chart_baseline_fraction:.0%} TARGET BASELINE"
             baseline_bbox = draw.textbbox((0, 0), baseline_label, font=small_font)
             draw.text(
                 (chart_right - (baseline_bbox[2] - baseline_bbox[0]), baseline_y - max(12, int(height * 0.018))),
@@ -624,15 +647,40 @@ def render_wallpaper(
         status_color = alert if score < 50 else text
         header_x = int(width * 0.07)
         header_y = int(height * 0.08)
-        lines = [
-            "// GLITCHSLATE TELEMETRY CORE v1.0 //",
-            "-------------------------------------------",
-            f"CURRENT SCORE : [ {score:3d} / 100  ]",
-            f"ACTIVE STREAK : [ {streak_days:3d} DAYS{'*' if streak_pending else ' '} ]",
-            f"TODAY VOLUME  : [ {_format_points(today_points):>8} ]",
-            f"LATEST {chart_window_days}D     : [ {_format_points(latest):>8} ]",
-            f"SYSTEM STATUS : [ {status:<9} ]",
-        ]
+        if weekly_mode:
+            week_total = weekly_points_total if weekly_points_total is not None else latest
+            if weekly_target_points is not None:
+                week_target = int(round(weekly_target_points))
+                week_percentage = 100.0 if week_target <= 0 else min(100.0, week_total / week_target * 100.0)
+                week_target_label = _format_points(week_target) if week_target > 0 else "OFF"
+                weekly_lines = [
+                    f"WEEK TOTAL    : [ {_format_points(week_total):>8} / {week_target_label} ]",
+                    f"WEEK PROGRESS : [ {week_percentage:3.0f}%          ]",
+                ]
+            else:
+                weekly_lines = [
+                    f"WEEK TOTAL    : [ {_format_points(week_total):>8} ]",
+                    "WEEK VIEW     : [ LAST 4 WEEKS   ]",
+                ]
+            lines = [
+                "// GLITCHSLATE TELEMETRY CORE v1.0 //",
+                "-------------------------------------------",
+                f"DAILY SCORE   : [ {score:3d} / 100  ]",
+                f"ACTIVE STREAK : [ {streak_days:3d} DAYS{'*' if streak_pending else ' '} ]",
+                f"TODAY VOLUME  : [ {_format_points(today_points):>8} ]",
+                *weekly_lines,
+                f"SYSTEM STATUS : [ {status:<9} ]",
+            ]
+        else:
+            lines = [
+                "// GLITCHSLATE TELEMETRY CORE v1.0 //",
+                "-------------------------------------------",
+                f"DAILY SCORE   : [ {score:3d} / 100  ]",
+                f"ACTIVE STREAK : [ {streak_days:3d} DAYS{'*' if streak_pending else ' '} ]",
+                f"TODAY VOLUME  : [ {_format_points(today_points):>8} ]",
+                f"LATEST {chart_window_days}D     : [ {_format_points(latest):>8} ]",
+                f"SYSTEM STATUS : [ {status:<9} ]",
+            ]
         for offset, line in enumerate(lines):
             fill = status_color if "SYSTEM STATUS" in line else text if offset in {0, 2, 3, 4} else muted
             draw.text((header_x, header_y + offset * int(height * 0.04)), line, fill=fill, font=title_font if offset == 0 else meta_font)
@@ -659,11 +707,23 @@ def render_wallpaper(
             if any(int(point.get("bucket_points", {}).get(bucket, 0)) > 0 for point in points)
         ]
         bucket_label = " + ".join(active_bucket_names) if active_bucket_names else "RUN + WORKOUT"
-        footer = (
-            f"{chart_window_days}-DAY ROLLING TOTALS // "
-            f"TARGET {int(round(expected_recent_points))}pt/{chart_window_days}D // "
-            f"{bucket_label} // WINDOW END {day}"
-        )
+        if weekly_mode:
+            target_label = (
+                _format_points(int(round(weekly_target_points)))
+                if weekly_target_points is not None
+                else "--"
+            )
+            footer = (
+                "WEEKLY CUMULATIVE TOTALS // "
+                f"TARGET {target_label} // "
+                f"{bucket_label} // WEEK OF {week_start or day}"
+            )
+        else:
+            footer = (
+                f"{chart_window_days}-DAY ROLLING TOTALS // "
+                f"TARGET {int(round(expected_recent_points))}pt/{chart_window_days}D // "
+                f"{bucket_label} // WINDOW END {day}"
+            )
         footer_y = int(height * (0.82 if next_priority else 0.80))
         draw.text((chart_left, footer_y), footer, fill=muted, font=small_font)
 

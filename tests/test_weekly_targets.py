@@ -13,11 +13,14 @@ from telegram_sync import sync_telegram
 from weekly_targets import (
     format_weekly_targets,
     next_target_priority,
+    set_weekly_points_target,
     set_weekly_target,
     target_baseline_points,
     target_chart_points,
+    weekly_points_progress,
     weekly_target_progress,
 )
+from db import weekly_cumulative_chart_points
 
 
 class WeeklyTargetTests(unittest.TestCase):
@@ -65,6 +68,65 @@ class WeeklyTargetTests(unittest.TestCase):
         )
         next_week = weekly_target_progress(self.conn, self.defaults, today=date(2026, 9, 23))
         self.assertEqual(next(item.target for item in next_week if item.key == "social"), 4.0)
+
+    def test_weekly_points_are_cumulative_and_target_override_is_week_specific(self) -> None:
+        for external_id, day, points in (
+            ("mon", 14, 100),
+            ("tue", 15, 200),
+            ("wed", 16, 300),
+            ("next-mon", 21, 900),
+        ):
+            upsert_activity(
+                self.conn,
+                Activity(
+                    source="telegram",
+                    external_id=external_id,
+                    timestamp=datetime(2026, 9, day, 8, 0, tzinfo=timezone.utc),
+                    activity_type="strength",
+                    duration_minutes=1,
+                    points=points,
+                ),
+            )
+
+        progress = weekly_points_progress(self.conn, 1000, today=self.today)
+        self.assertEqual(progress.week_start, "2026-09-14")
+        self.assertEqual(progress.value, 600)
+        self.assertEqual(progress.percentage, 60)
+
+        set_weekly_points_target(self.conn, 1000, target=800, week_start=date(2026, 9, 14))
+        changed = weekly_points_progress(self.conn, 1000, today=self.today)
+        self.assertEqual(changed.target, 800)
+        next_week = weekly_points_progress(self.conn, 1000, today=date(2026, 9, 21))
+        self.assertEqual(next_week.target, 1000)
+        self.assertEqual(next_week.value, 900)
+
+    def test_weekly_chart_contains_cumulative_monday_to_sunday_values(self) -> None:
+        for external_id, day, points in (("mon", 14, 100), ("tue", 15, 200), ("wed", 16, 300)):
+            upsert_activity(
+                self.conn,
+                Activity(
+                    source="telegram",
+                    external_id=external_id,
+                    timestamp=datetime(2026, 9, day, 8, 0, tzinfo=timezone.utc),
+                    activity_type="strength",
+                    duration_minutes=1,
+                    points=points,
+                ),
+            )
+
+        chart = weekly_cumulative_chart_points(self.conn, end_day=self.today, week_count=1)
+        self.assertEqual([point.total_points for point in chart], [100, 300, 600, 0, 0, 0, 0])
+        self.assertEqual([point.day for point in chart], [
+            "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17",
+            "2026-09-18", "2026-09-19", "2026-09-20",
+        ])
+        self.assertTrue(chart[2].is_best)
+        self.assertFalse(chart[3].is_best)
+
+        four_week_chart = weekly_cumulative_chart_points(self.conn, end_day=self.today)
+        self.assertEqual(len(four_week_chart), 28)
+        self.assertEqual(four_week_chart[0].day, "2026-08-24")
+        self.assertEqual([point.total_points for point in four_week_chart[21:24]], [100, 300, 600])
 
     def test_progress_uses_run_distance_cindy_words_and_social_posts(self) -> None:
         upsert_activity(

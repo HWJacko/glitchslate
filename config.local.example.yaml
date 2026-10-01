@@ -19,6 +19,9 @@ targets:
   enabled: true
   show_on_wallpaper: true
   baseline_fraction: 0.8
+  weekly_points_target: 10000
+  # Empty means all recorded activity points count toward the weekly total.
+  weekly_points_sources: []
   defaults:
     - key: project_a
       label: PROJECT A

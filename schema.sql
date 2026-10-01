@@ -40,3 +40,9 @@ CREATE TABLE IF NOT EXISTS weekly_targets (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (week_start, target_key)
 );
+
+CREATE TABLE IF NOT EXISTS weekly_point_targets (
+    week_start TEXT PRIMARY KEY,
+    target_value REAL NOT NULL CHECK (target_value >= 0),
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

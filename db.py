@@ -421,9 +421,11 @@ def daily_source_points(
     *,
     start_day: date,
     end_day: date,
+    source_names: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, dict[str, int]]:
+    source_clause, source_params = _source_filter_sql(source_names)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             local_date,
             source,
@@ -431,9 +433,10 @@ def daily_source_points(
             COALESCE(SUM(points), 0) AS total_points
         FROM activities
         WHERE local_date >= ? AND local_date <= ?
+        {source_clause}
         GROUP BY local_date, source, activity_type
         """,
-        (start_day.isoformat(), end_day.isoformat()),
+        (start_day.isoformat(), end_day.isoformat(), *source_params),
     ).fetchall()
     values: dict[str, dict[str, int]] = {}
     for row in rows:
@@ -631,6 +634,70 @@ def rolling_chart_points(
             other_points=point.other_points,
             total_points=point.total_points,
             is_best=point.total_points == max_total,
+            bucket_points=dict(point.bucket_points),
+        )
+        for point in points
+    ]
+
+
+def weekly_cumulative_chart_points(
+    conn: sqlite3.Connection,
+    *,
+    end_day: date,
+    week_count: int = 4,
+    source_names: tuple[str, ...] | list[str] | None = None,
+) -> list[DailyChartPoint]:
+    """Return cumulative Monday-Sunday points for the last ``week_count`` weeks."""
+    if week_count <= 0:
+        raise ValueError("week_count must be positive")
+    current_week_start = end_day - timedelta(days=end_day.weekday())
+    first_week_start = current_week_start - timedelta(days=7 * (week_count - 1))
+    by_day = daily_source_points(
+        conn,
+        start_day=first_week_start,
+        end_day=end_day,
+        source_names=source_names,
+    )
+    points: list[DailyChartPoint] = []
+    cumulative_by_week: dict[date, dict[str, int]] = {}
+    for offset in range(7 * week_count):
+        day = first_week_start + timedelta(days=offset)
+        week_start = day - timedelta(days=day.weekday())
+        cumulative = cumulative_by_week.setdefault(week_start, {})
+        if day <= end_day:
+            for bucket, value in by_day.get(day.isoformat(), {}).items():
+                cumulative[bucket] = cumulative.get(bucket, 0) + value
+            bucket_points = dict(cumulative)
+        else:
+            bucket_points = {}
+        total = sum(bucket_points.values())
+        points.append(
+            DailyChartPoint(
+                day=day.isoformat(),
+                run_points=bucket_points.get("run", 0),
+                other_points=sum(value for bucket, value in bucket_points.items() if bucket != "run"),
+                total_points=total,
+                bucket_points=bucket_points,
+            )
+        )
+
+    highlighted_days: set[str] = set()
+    for week_offset in range(week_count):
+        visible_end = min(current_week_start, first_week_start + timedelta(days=7 * week_offset))
+        visible_end += timedelta(days=6)
+        if visible_end > end_day:
+            visible_end = end_day
+        index = (visible_end - first_week_start).days
+        if 0 <= index < len(points) and points[index].total_points > 0:
+            highlighted_days.add(points[index].day)
+
+    return [
+        DailyChartPoint(
+            day=point.day,
+            run_points=point.run_points,
+            other_points=point.other_points,
+            total_points=point.total_points,
+            is_best=point.day in highlighted_days,
             bucket_points=dict(point.bucket_points),
         )
         for point in points

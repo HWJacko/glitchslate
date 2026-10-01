@@ -14,9 +14,13 @@ from db import Activity, connect, get_sync_state, init_db, set_sync_state, upser
 from known_workouts import parse_known_workout
 from weekly_targets import (
     format_weekly_targets,
+    format_weekly_points,
     set_weekly_target,
+    set_weekly_points_target,
     weekly_target_progress,
+    weekly_points_progress,
     reset_weekly_targets,
+    reset_weekly_points_target,
 )
 
 
@@ -298,12 +302,12 @@ def _target_command(text: str) -> tuple[str, list[str]] | None:
     return command.lstrip("/"), parts[1:]
 
 
-def _parse_target_value(value: str) -> float:
+def _parse_target_value(value: str, *, allow_zero: bool = False) -> float:
     cleaned = value.strip().lower().replace(",", "")
-    cleaned = re.sub(r"(?:km|kilometers?|sessions?|words?|posts?)$", "", cleaned).strip()
+    cleaned = re.sub(r"(?:km|kilometers?|sessions?|words?|posts?|points?|pt)$", "", cleaned).strip()
     parsed = float(cleaned)
-    if parsed <= 0:
-        raise ValueError("target value must be positive")
+    if parsed < 0 or (parsed == 0 and not allow_zero):
+        raise ValueError("target value must not be negative" if allow_zero else "target value must be positive")
     return parsed
 
 
@@ -313,25 +317,49 @@ def _handle_target_command(
     *,
     defaults,
     today: date,
+    weekly_points_target: float = 10000.0,
+    weekly_points_sources=(),
 ) -> str | None:
     parsed = _target_command(text)
     if parsed is None:
         return None
     command, args = parsed
     progress = weekly_target_progress(conn, defaults, today=today)
+    points_progress = weekly_points_progress(
+        conn,
+        weekly_points_target,
+        today=today,
+        source_names=weekly_points_sources,
+    )
     if command == "targets" and (not args or args[0].lower() in {"list", "show"}):
-        return format_weekly_targets(progress)
+        return format_weekly_points(points_progress) + "\n\n" + format_weekly_targets(progress)
     if args and args[0].lower() == "reset":
-        reset_weekly_targets(conn, defaults, week_start=today - timedelta(days=today.weekday()))
-        return "Weekly targets reset to defaults.\n\n" + format_weekly_targets(
-            weekly_target_progress(conn, defaults, today=today)
-        )
+        week_start = today - timedelta(days=today.weekday())
+        reset_weekly_targets(conn, defaults, week_start=week_start)
+        reset_weekly_points_target(conn, weekly_points_target, week_start=week_start)
+        return "Weekly targets reset to defaults.\n\n" + format_weekly_points(
+            weekly_points_progress(
+                conn,
+                weekly_points_target,
+                today=today,
+                source_names=weekly_points_sources,
+            )
+        ) + "\n\n" + format_weekly_targets(weekly_target_progress(conn, defaults, today=today))
     if command == "targets" and args and args[0].lower() == "set":
         args = args[1:]
     if len(args) != 2:
-        return "Usage: /target <run|cindy|short_story|main_project|social|non_fiction> <value>"
+        return "Usage: /target <points|run|cindy|short_story|main_project|social|non_fiction> <value>"
     try:
-        value = _parse_target_value(args[1])
+        is_points = args[0].lower() in {"points", "weekly_points", "total", "weekly_total"}
+        value = _parse_target_value(args[1], allow_zero=is_points)
+        if is_points:
+            changed = set_weekly_points_target(
+                conn,
+                weekly_points_target,
+                target=value,
+                week_start=today - timedelta(days=today.weekday()),
+            )
+            return f"Weekly points target set to {changed:g} pt."
         changed = set_weekly_target(
             conn,
             defaults,
@@ -384,6 +412,8 @@ def sync_telegram_updates(
     skip_existing: bool = False,
     max_message_chars: int = 4_000,
     target_defaults=None,
+    weekly_points_target: float = 10000.0,
+    weekly_points_sources=(),
     send_message: Callable[[str, dict[str, Any], int], dict[str, Any]] | None = None,
     target_reply_timeout: int = 30,
 ) -> int:
@@ -415,6 +445,8 @@ def sync_telegram_updates(
                 text,
                 defaults=target_defaults,
                 today=_message_datetime(message).astimezone(tz).date(),
+                weekly_points_target=weekly_points_target,
+                weekly_points_sources=weekly_points_sources,
             )
             if response_text and send_message is not None:
                 chat = message.get("chat") or {}
@@ -502,6 +534,8 @@ def sync_telegram(
     request_timeout: int = 10,
     max_message_chars: int = 4_000,
     target_defaults=None,
+    weekly_points_target: float = 10000.0,
+    weekly_points_sources=(),
     request_post: Callable[[str, dict[str, Any], int], dict[str, Any]] = _request_post,
 ) -> int:
     last_update = get_sync_state(conn, "telegram_last_update_id")
@@ -523,6 +557,8 @@ def sync_telegram(
         timezone_name=timezone_name,
         max_message_chars=max_message_chars,
         target_defaults=target_defaults,
+        weekly_points_target=weekly_points_target,
+        weekly_points_sources=weekly_points_sources,
         send_message=lambda chat_id, data, timeout: request_post(
             f"{TELEGRAM_API_BASE}/bot{token}/sendMessage", data, timeout
         ),

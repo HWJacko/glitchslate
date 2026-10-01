@@ -71,6 +71,10 @@ targets:
   enabled: false
   show_on_wallpaper: false
   baseline_fraction: 0.8
+  # Combined points target for the current Monday-Sunday week.
+  weekly_points_target: 10000
+  # Empty means all activity sources contribute to the weekly total.
+  weekly_points_sources: []
   # Add target definitions in config.local.yaml.
   defaults: []
 

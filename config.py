@@ -143,6 +143,8 @@ class TargetsConfig:
     enabled: bool = True
     show_on_wallpaper: bool = False
     baseline_fraction: float = 0.8
+    weekly_points_target: float = 10000.0
+    weekly_points_sources: tuple[str, ...] = ()
     defaults: tuple[WeeklyTargetConfig, ...] = ()
 
 
@@ -315,6 +317,8 @@ def default_config_dict() -> dict[str, Any]:
             "enabled": False,
             "show_on_wallpaper": False,
             "baseline_fraction": 0.8,
+            "weekly_points_target": 10000.0,
+            "weekly_points_sources": [],
             "defaults": [],
         },
         "external_metrics": {
@@ -376,6 +380,10 @@ def _normalize_writing(raw: dict[str, Any]) -> WritingConfig:
 
 def _normalize_targets(raw: dict[str, Any]) -> TargetsConfig:
     values = dict(raw)
+    sources = values.get("weekly_points_sources", [])
+    if not isinstance(sources, (list, tuple)):
+        raise ValueError("targets.weekly_points_sources must be a list")
+    values["weekly_points_sources"] = tuple(str(source).strip() for source in sources if str(source).strip())
     defaults = values.get("defaults", [])
     if not isinstance(defaults, (list, tuple)):
         raise ValueError("targets.defaults must be a list")
@@ -533,6 +541,8 @@ def validate_config(config: AppConfig) -> None:
     _validate_http_url(config.social.bluesky_rss_url, "social.bluesky_rss_url", allow_placeholder=True)
     if not 0 < config.targets.baseline_fraction <= 1:
         raise ValueError("targets.baseline_fraction must be greater than 0 and at most 1")
+    if config.targets.weekly_points_target < 0:
+        raise ValueError("targets.weekly_points_target must not be negative")
     seen_target_keys: set[str] = set()
     for target in config.targets.defaults:
         if not target.key.strip():

@@ -36,12 +36,12 @@ class MockOutputTests(unittest.TestCase):
             self.assertTrue(wallpaper.exists())
             self.assertTrue(summary_path.exists())
             self.assertEqual(summary["activity_count"], 22)
-            self.assertEqual(summary["diagnostics"]["bar_count"], 30)
+            self.assertEqual(summary["diagnostics"]["bar_count"], 28)
             self.assertEqual(summary["date"], "2026-07-13")
             self.assertEqual(summary["source_counts"]["telegram"], 15)
             self.assertEqual(summary["source_counts"]["strava"], 7)
-            self.assertEqual(summary["chart_window_days"], 3)
-            self.assertEqual(len(summary["chart_points"]), 30)
+            self.assertEqual(summary["chart_window_days"], 7)
+            self.assertEqual(len(summary["chart_points"]), 28)
             self.assertEqual(json.loads(summary_path.read_text())["score"], summary["score"])
 
 

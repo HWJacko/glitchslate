@@ -133,8 +133,8 @@ class MainPipelineTests(unittest.TestCase):
             ), patch.object(
                 main, "render_wallpaper", side_effect=fake_render_wallpaper
             ), patch.object(
-                main, "rolling_chart_points", return_value=chart_points
-            ) as rolling_chart_points, patch.object(
+                main, "weekly_cumulative_chart_points", return_value=chart_points
+            ) as weekly_cumulative_chart_points, patch.object(
                 main, "set_wallpaper", return_value=["set-wallpaper"]
             ), patch.object(
                 main, "cleanup_old_wallpapers"
@@ -150,9 +150,8 @@ class MainPipelineTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(captured["top_right_metrics"], [portfolio_metric, *crypy_metrics])
             self.assertEqual(captured["chart_points"], chart_points)
-            self.assertEqual(captured["expected_recent_points"], 900)
-            rolling_chart_points.assert_called_once()
-            self.assertEqual(rolling_chart_points.call_args.kwargs["window_days"], 3)
+            self.assertEqual(captured["expected_recent_points"], 2100)
+            weekly_cumulative_chart_points.assert_called_once()
 
     def test_pipeline_runs_enabled_writing_and_social_collectors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,7 +15,7 @@ from db import (
     get_last_run_details,
     init_db,
     points_for_day,
-    rolling_chart_points,
+    weekly_cumulative_chart_points,
     set_cached_sentient_log,
     set_sync_state,
 )
@@ -32,8 +32,7 @@ from visual_engine import criticality_factor_for_time, render_wallpaper, score_w
 from writing_sync import sync_writing_projects
 from weekly_targets import (
     next_target_priority,
-    target_baseline_points,
-    target_chart_points,
+    weekly_points_progress,
     weekly_target_progress,
 )
 
@@ -100,6 +99,8 @@ def run_pipeline(
                 request_timeout=app_config.telegram.request_timeout_seconds,
                 max_message_chars=app_config.parser.max_message_chars,
                 target_defaults=app_config.targets.defaults if app_config.targets.enabled else None,
+                weekly_points_target=app_config.targets.weekly_points_target,
+                weekly_points_sources=app_config.targets.weekly_points_sources,
             )
             print(f"telegram synced {telegram_count} workout activity records")
         except Exception as exc:
@@ -208,8 +209,19 @@ def run_pipeline(
             )
 
     target_progress = []
+    weekly_progress = None
     priority_message = None
     if app_config.targets.enabled:
+        weekly_progress = weekly_points_progress(
+            conn,
+            app_config.targets.weekly_points_target,
+            today=today,
+            source_names=app_config.targets.weekly_points_sources,
+        )
+        print(
+            f"weekly points {weekly_progress.value}/"
+            f"{weekly_progress.target:g} pt ({weekly_progress.percentage:.0f}%)"
+        )
         target_progress = weekly_target_progress(
             conn,
             app_config.targets.defaults,
@@ -230,37 +242,34 @@ def run_pipeline(
         scoring_config=app_config.scoring,
         persist=not dry_run,
     )
-    chart_window_days = app_config.chart.rolling_window_days
-    chart_points = rolling_chart_points(
+    chart_window_days = 7
+    chart_points = weekly_cumulative_chart_points(
         conn,
         end_day=today,
-        point_count=app_config.chart.history_days,
-        window_days=chart_window_days,
+        week_count=4,
+        source_names=(
+            app_config.targets.weekly_points_sources
+            if app_config.targets.enabled
+            else app_config.scoring.included_sources
+        ),
     )
-    chart_target_points = score.expected_recent_points * chart_window_days
-    render_expected_points = chart_target_points
-    normalized_chart_points = None
-    normalized_baseline_points = None
-    if app_config.targets.enabled and app_config.targets.show_on_wallpaper:
-        normalized_chart_points = target_chart_points(
-            conn,
-            app_config.targets.defaults,
-            end_day=today,
-            point_count=app_config.chart.history_days,
-            window_days=chart_window_days,
-        )
-        normalized_baseline_points = target_baseline_points(
-            len(target_progress),
-            window_days=chart_window_days,
-            baseline_fraction=app_config.targets.baseline_fraction,
-        )
-        if app_config.targets.baseline_fraction > 0:
-            render_expected_points = max(
-                render_expected_points,
-                normalized_baseline_points / app_config.targets.baseline_fraction,
-            )
-    today_points = points_for_day(conn, today, source_names=app_config.scoring.included_sources)
-    gap_days = current_gap_days(conn, end_day=today, source_names=app_config.scoring.included_sources)
+    render_expected_points = (
+        weekly_progress.target
+        if weekly_progress is not None and weekly_progress.target > 0
+        else score.expected_recent_points * chart_window_days
+    )
+    normalized_baseline_points = (
+        weekly_progress.target
+        if weekly_progress is not None and weekly_progress.target > 0
+        else None
+    )
+    weekly_source_names = (
+        app_config.targets.weekly_points_sources
+        if app_config.targets.enabled
+        else app_config.scoring.included_sources
+    )
+    today_points = points_for_day(conn, today, source_names=weekly_source_names)
+    gap_days = current_gap_days(conn, end_day=today, source_names=weekly_source_names)
     last_run_details = get_last_run_details(conn)
     criticality_factor = (
         criticality_factor_for_time(
@@ -361,10 +370,9 @@ def run_pipeline(
         height=render_height,
         visual_config=app_config.visual,
         chart_points=chart_points,
-        target_chart_points=normalized_chart_points,
         chart_window_days=chart_window_days,
         chart_baseline_points=normalized_baseline_points,
-        chart_baseline_fraction=app_config.targets.baseline_fraction,
+        chart_baseline_fraction=1.0,
         streak_days=score.streak_days,
         streak_pending=score.streak_pending,
         expected_recent_points=render_expected_points,
@@ -378,6 +386,10 @@ def run_pipeline(
         criticality_factor=criticality_factor,
         top_right_metrics=top_right_metrics,
         next_priority=priority_message,
+        weekly_target_points=weekly_progress.target if weekly_progress is not None else None,
+        weekly_points_total=weekly_progress.value if weekly_progress is not None else None,
+        week_start=weekly_progress.week_start if weekly_progress is not None else None,
+        weekly_view=True,
     )
     if not app_config.visual.keep_archive_images:
         cleanup_old_wallpapers(assets_dir, older_than_hours=app_config.visual.archive_retention_hours)
@@ -396,6 +408,7 @@ def run_pipeline(
         f"today_score_points={score.recent_points} "
         f"baseline_daily_points={score.baseline_daily_points:.2f} "
         f"expected_daily_points={score.expected_recent_points:.2f} "
+        f"weekly_points={weekly_progress.value if weekly_progress is not None else 'n/a'} "
         f"today_points={today_points} gap_days={gap_days} "
         f"next_priority={priority_message or 'none'} "
         f"glitch_factor={result.glitch_factor:.2f} wallpaper={result.timestamped_path}"

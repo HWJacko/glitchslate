@@ -24,11 +24,12 @@ from db import (
     init_db,
     minutes_for_day,
     points_for_day,
-    rolling_chart_points,
+    weekly_cumulative_chart_points,
     upsert_activity,
 )
 from sentient_log import fallback_sentient_log
 from visual_engine import criticality_factor_for_time, render_wallpaper, score_with_time_criticality, systemd_status_lines
+from weekly_targets import weekly_points_progress
 
 
 DEFAULT_END_DAY = date(2026, 7, 13)
@@ -163,17 +164,35 @@ def build_mock_output(
         scoring_config=app_config.scoring,
         persist=True,
     )
-    chart_window_days = app_config.chart.rolling_window_days
-    chart_points = rolling_chart_points(
+    weekly_progress = (
+        weekly_points_progress(
+            conn,
+            app_config.targets.weekly_points_target,
+            today=end_day,
+            source_names=app_config.targets.weekly_points_sources,
+        )
+        if app_config.targets.enabled
+        else None
+    )
+    chart_window_days = 7
+    chart_points = weekly_cumulative_chart_points(
         conn,
         end_day=end_day,
-        point_count=app_config.scoring.baseline_window_days,
-        window_days=chart_window_days,
+        week_count=4,
+        source_names=(
+            app_config.targets.weekly_points_sources
+            if app_config.targets.enabled
+            else app_config.scoring.included_sources
+        ),
     )
-    chart_target_points = score.expected_recent_points * chart_window_days
     today_minutes = minutes_for_day(conn, end_day)
-    today_points = points_for_day(conn, end_day)
-    gap_days = current_gap_days(conn, end_day=end_day)
+    source_names = (
+        app_config.targets.weekly_points_sources
+        if app_config.targets.enabled
+        else app_config.scoring.included_sources
+    )
+    today_points = points_for_day(conn, end_day, source_names=source_names)
+    gap_days = current_gap_days(conn, end_day=end_day, source_names=source_names)
     last_run_details = get_last_run_details(conn)
     render_timestamp = datetime(end_day.year, end_day.month, end_day.day, 12, 0, 0, tzinfo=tz)
     criticality_factor = (
@@ -205,7 +224,11 @@ def build_mock_output(
         chart_window_days=chart_window_days,
         streak_days=score.streak_days,
         streak_pending=score.streak_pending,
-        expected_recent_points=chart_target_points,
+        expected_recent_points=(
+            weekly_progress.target
+            if weekly_progress is not None and weekly_progress.target > 0
+            else score.expected_recent_points * chart_window_days
+        ),
         today_points=today_points,
         gap_days=gap_days,
         last_run_details=last_run_details,
@@ -214,6 +237,10 @@ def build_mock_output(
         show_vignette=app_config.telemetry.show_vignette,
         systemd_alert_gap_days=app_config.telemetry.gap_alert_days,
         criticality_factor=criticality_factor,
+        weekly_target_points=weekly_progress.target if weekly_progress is not None else None,
+        weekly_points_total=weekly_progress.value if weekly_progress is not None else None,
+        week_start=weekly_progress.week_start if weekly_progress is not None else None,
+        weekly_view=True,
     )
 
     start_day = end_day - timedelta(days=44)
@@ -264,6 +291,8 @@ def build_mock_output(
         "expected_recent_points": score.expected_recent_points,
         "today_minutes": today_minutes,
         "today_points": today_points,
+        "weekly_points": weekly_progress.value if weekly_progress is not None else None,
+        "weekly_target_points": weekly_progress.target if weekly_progress is not None else None,
         "gap_days": gap_days,
         "systemd_lines": systemd_status_lines(
             today_points,
